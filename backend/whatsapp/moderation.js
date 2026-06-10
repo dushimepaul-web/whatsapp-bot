@@ -1,6 +1,5 @@
 const logger = require("../utils/logger");
 const Member = require("../models/Member");
-const Group = require("../models/Group");
 
 const getRealMessage = (message) => {
   if (!message) return null;
@@ -32,25 +31,17 @@ class Moderation {
     const msgContent = getRealMessage(rawContent);
     if (!msgContent) return;
 
-    // Vérifier si le groupe est restreint
-    const group = await Group.findOne({ groupId: from });
-    if (!group || !group.isRestricted) return;
-
+    // Modération active sur TOUS les groupes (contrôlé par moderationEnabled dans Settings)
     const rawParticipant = msg.key.participant || msg.key.remoteJid;
     if (!rawParticipant) return;
     const participant = rawParticipant.split("@")[0].split(":")[0] + "@" + (rawParticipant.split("@")[1] || "s.whatsapp.net");
 
-    // Vérifier si l'expéditeur est admin
+    // Vérifier si l'expéditeur est admin (on compare sans device ID)
+    const senderPhone = participant.split("@")[0].split(":")[0];
     let isAdmin = false;
-    const member = await Member.findOne({ groupId: from, jid: participant });
+    const member = await Member.findOne({ groupId: from, jid: { $regex: `^${senderPhone}` } });
     if (member?.isAdmin || member?.isSuperAdmin) {
       isAdmin = true;
-    } else {
-      const altJid = participant.includes("@lid") ? participant.replace(/@lid/, "@s.whatsapp.net") : participant.replace(/@s\.whatsapp\.net/, "@lid");
-      const altMember = await Member.findOne({ groupId: from, jid: altJid });
-      if (altMember?.isAdmin || altMember?.isSuperAdmin) {
-        isAdmin = true;
-      }
     }
     if (isAdmin) return;
 
@@ -76,40 +67,39 @@ class Moderation {
       "contactMessage", "contactsArrayMessage"
     ];
 
-    if (forbiddenMediaTypes.includes(msgType)) {
+    if (!msgType) {
+      return;
+    } else if (forbiddenMediaTypes.includes(msgType)) {
       isDisallowed = true;
       reason = "les médias (photo, vidéo, audio, document, sticker, etc.)";
     } else if (hasLink) {
       isDisallowed = true;
       reason = "les liens";
-    } else if (msgType && msgType !== "conversation" && msgType !== "extendedTextMessage") {
-      // Si c'est un autre type inconnu mais présent
+    } else if (msgType !== "conversation" && msgType !== "extendedTextMessage") {
       isDisallowed = true;
       reason = "les messages non-texte";
     }
 
     if (isDisallowed) {
       try {
-        const warningText = `@${participant.split("@")[0]} Désolé, ${reason} ne sont pas autorisés dans ce groupe. Seul le texte simple est permis pour les membres.`;
-        
+        // Supprimer immédiatement (si bot admin), puis avertir
+        try {
+          await sock.sendMessage(from, { delete: msg.key });
+        } catch (delErr) {
+          logger.warn(`Suppression impossible dans ${from}: ${delErr.message}. Le bot n'est peut-être pas admin.`);
+        }
+
         await sock.sendMessage(from, {
-          text: warningText,
+          text: `@${participant.split("@")[0]} Désolé, ${reason} ne sont pas autorisés dans ce groupe. Seul le texte simple est permis pour les membres.`,
           mentions: [participant],
         });
-
-        const botIsAdmin = await this.isGroupAdmin(sock, from, sock.user?.id);
-        if (botIsAdmin) {
-          await sock.sendMessage(from, { delete: msg.key });
-        } else {
-          logger.warn("Le bot n'est pas admin dans ce groupe, suppression impossible");
-        }
 
         logger.info(`Message modéré (${reason}) de ${participant} dans ${from}`);
         await logger.db({
           userId,
           type: "moderation",
           action: "message_deleted",
-          details: { reason, from, participant, deleted: botIsAdmin },
+          details: { reason, from, participant },
         });
       } catch (err) {
         logger.error(`Erreur modération: ${err.message || err}`);
@@ -117,21 +107,7 @@ class Moderation {
     }
   }
 
-  async isGroupAdmin(sock, groupId, participantJid) {
-    try {
-      if (!participantJid) return false;
-      const cleanJid = participantJid.split("@")[0].split(":")[0] + "@" + (participantJid.split("@")[1] || "s.whatsapp.net");
-      let member = await Member.findOne({ groupId, jid: cleanJid });
-      if (member?.isAdmin || member?.isSuperAdmin) return true;
-      
-      const altJid = cleanJid.includes("@lid") ? cleanJid.replace(/@lid/, "@s.whatsapp.net") : cleanJid.replace(/@s\.whatsapp\.net/, "@lid");
-      member = await Member.findOne({ groupId, jid: altJid });
-      return member?.isAdmin || member?.isSuperAdmin || false;
-    } catch (e) {
-      logger.warn("Erreur isGroupAdmin:", e);
-      return false;
-    }
-  }
+
 }
 
 module.exports = new Moderation();

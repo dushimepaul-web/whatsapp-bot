@@ -206,7 +206,6 @@ class BroadcastManager {
         await sock.sendPresenceUpdate("composing", targetId);
         await this.sleep(800 + Math.random() * 1200);
 
-        const msgType = Object.keys(msg.message || {})[0] || "?";
         await this.forwardMessage(sock, targetId, msg, rule);
 
         this.messageWindow.push(Date.now());

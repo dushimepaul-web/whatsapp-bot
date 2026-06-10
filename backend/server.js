@@ -1,6 +1,8 @@
 const express = require("express");
 const http = require("http");
 const cors = require("cors");
+const helmet = require("helmet");
+const mongoose = require("mongoose");
 const path = require("path");
 const fs = require("fs");
 const config = require("./config");
@@ -8,16 +10,21 @@ const connectDB = require("./config/database");
 const { apiLimiter } = require("./middlewares/rateLimiter");
 const { setupSocket } = require("./sockets");
 const logger = require("./utils/logger");
+const whatsappService = require("./services/whatsappService");
 
 const app = express();
 app.set("trust proxy", 1);
 const server = http.createServer(app);
 
+app.use(helmet({ crossOriginResourcePolicy: { policy: "cross-origin" } }));
 app.use(cors({ origin: config.cors.origin, credentials: true }));
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
 app.use(apiLimiter);
 
+app.get("/api/health", (req, res) => {
+  res.json({ status: "ok", uptime: process.uptime(), mongo: mongoose.connection.readyState === 1 });
+});
 app.use("/api/auth", require("./routes/auth"));
 app.use("/api/whatsapp", require("./routes/whatsapp"));
 app.use("/api/groups", require("./routes/groups"));
@@ -50,4 +57,19 @@ const start = async () => {
   });
 };
 
-start();
+start().catch(e => {
+  logger.error("Échec démarrage serveur:", e);
+  process.exit(1);
+});
+
+process.on("SIGTERM", shutdown);
+process.on("SIGINT", shutdown);
+
+async function shutdown() {
+  logger.info("Arrêt gracieux...");
+  server.close();
+  await whatsappService.disconnect();
+  await mongoose.disconnect();
+  logger.info("Serveur arrêté");
+  process.exit(0);
+}

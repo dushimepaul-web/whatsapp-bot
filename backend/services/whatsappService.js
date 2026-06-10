@@ -227,23 +227,24 @@ class WhatsAppService {
 
     sock.ev.on("messages.upsert", async ({ messages, type }) => {
       try {
-        const msg = messages?.[0];
-        if (!msg || !msg.message) return;
-        const from = msg.key.remoteJid;
-        if (!from) { logger.warn("messages.upsert: remoteJid vide"); return; }
-        if (!from.endsWith("@g.us")) return;
-        const msgKeys = Object.keys(msg.message);
-        await logger.db({
-          userId: this.userId,
-          type: "system",
-          action: "message_received",
-          details: { fromMe: msg.key.fromMe, from, type, participant: msg.key.participant, msgType: msgKeys },
-        });
+        if (!messages || !Array.isArray(messages)) return;
         const settings = await Setting.findOne({ userId: this.userId });
-        if (!msg.key.fromMe && settings?.moderationEnabled) {
-          await moderation.handleMessage(this.sock, msg, from, this.userId);
+        for (const msg of messages) {
+          if (!msg || !msg.message) continue;
+          const from = msg.key.remoteJid;
+          if (!from) continue;
+          if (!from.endsWith("@g.us")) continue;
+          await logger.db({
+            userId: this.userId,
+            type: "system",
+            action: "message_received",
+            details: { fromMe: msg.key.fromMe, from, type, participant: msg.key.participant, msgType: Object.keys(msg.message) },
+          });
+          if (!msg.key.fromMe && settings?.moderationEnabled) {
+            await moderation.handleMessage(this.sock, msg, from, this.userId);
+          }
+          broadcastManager.handleIncoming(this.sock, msg, from, this.userId);
         }
-        broadcastManager.handleIncoming(this.sock, msg, from, this.userId);
       } catch (e) {
         logger.error("Erreur messages.upsert:", e);
       }
@@ -328,7 +329,9 @@ class WhatsAppService {
     try {
       const botPhone = this.sock.user?.id ? this.sock.user.id.split("@")[0].split(":")[0] : null;
       const groups = await this.sock.groupFetchAllParticipating();
+      const processedGroupIds = [];
       for (const [id, g] of Object.entries(groups)) {
+        processedGroupIds.push(id);
         const metadata = g;
         const admins = (metadata.participants || []).filter((p) => p.admin).map((p) => p.id);
         const botIsAdmin = botPhone ? admins.some((a) => a.includes(botPhone)) : false;
@@ -345,6 +348,8 @@ class WhatsAppService {
           },
           { upsert: true, new: true }
         );
+        const participantIds = (metadata.participants || []).map(p => p.id);
+        await Member.deleteMany({ groupId: id, jid: { $nin: participantIds } });
         for (const p of metadata.participants || []) {
           await Member.findOneAndUpdate(
             { jid: p.id, groupId: id },
@@ -359,7 +364,8 @@ class WhatsAppService {
           );
         }
       }
-      logger.info(`Synchronisation: ${Object.keys(groups).length} groupes (chargement léger sans métadonnées)`);
+      await Member.deleteMany({ groupId: { $nin: processedGroupIds } });
+      logger.info(`Synchronisation: ${Object.keys(groups).length} groupes`);
       await logger.db({
         userId: this.userId,
         type: "system",
