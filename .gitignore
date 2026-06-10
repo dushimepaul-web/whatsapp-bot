@@ -1,0 +1,20 @@
+node_modules/
+node_modules
+
+# Auth
+auth_info
+auth_info/
+
+# Logs
+logs/
+*.log
+
+# Environment
+.env
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build
+frontend/build/

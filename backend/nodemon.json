@@ -1,0 +1,5 @@
+{
+  "watch": ["server.js", "config/", "controllers/", "middlewares/", "models/", "routes/", "services/", "sockets/", "utils/", "whatsapp/"],
+  "ignore": ["auth_info/", "node_modules/"],
+  "delay": 1000
+}
