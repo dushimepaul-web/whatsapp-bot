@@ -7,6 +7,28 @@ const { escapeRegex } = require("../utils/helpers");
 let io = null;
 let emitToUserFn = null;
 
+const cloneMsg = (msg) => {
+  if (!msg) return msg;
+  const deepClone = (obj) => {
+    if (Buffer.isBuffer(obj)) return Buffer.from(obj);
+    if (obj instanceof Uint8Array) return Buffer.from(obj);
+    if (obj === null || obj === undefined) return obj;
+    if (typeof obj !== 'object') return obj;
+    if (Array.isArray(obj)) return obj.map(deepClone);
+    const copy = {};
+    for (const [k, v] of Object.entries(obj)) {
+      copy[k] = deepClone(v);
+    }
+    return copy;
+  };
+  return {
+    key: msg.key ? deepClone(msg.key) : undefined,
+    message: msg.message ? deepClone(msg.message) : undefined,
+    messageTimestamp: msg.messageTimestamp,
+    pushName: msg.pushName,
+  };
+};
+
 const getRealMessage = (message) => {
   if (!message) return null;
   if (message.ephemeralMessage) return getRealMessage(message.ephemeralMessage.message);
@@ -16,12 +38,15 @@ const getRealMessage = (message) => {
   return message;
 };
 
+const BATCH_DELAY_MS = 3000;
+
 class BroadcastManager {
   constructor() {
     this.messageQueue = [];
     this.isProcessing = false;
     this.messageCount = 0;
     this.messageWindow = [];
+    this.batchBuffer = {};
   }
 
   async handleIncoming(sock, msg, from, userId) {
@@ -76,19 +101,18 @@ class BroadcastManager {
 
         logger.info(`Forward: ${targets.length} cibles pour la règle "${rule.name}"`);
 
-        if (rule.forwardToMembers) {
-          logger.warn(`Règle "${rule.name}": Envoi individuel aux membres activé pour ${targets.length} groupes.`);
-          for (const groupId of targets) {
-            const members = await Member.find({ groupId });
-            logger.info(`Groupe ${groupId}: Envoi à ${members.length} membres.`);
-            for (const member of members) {
-              this.queueMessage(sock, member.jid, msg, rule);
+          if (rule.forwardToMembers) {
+            logger.warn(`Règle "${rule.name}": Envoi individuel aux membres activé pour ${targets.length} groupes.`);
+            const cloned = cloneMsg(msg);
+            for (const groupId of targets) {
+              const members = await Member.find({ groupId });
+              logger.info(`Groupe ${groupId}: Envoi à ${members.length} membres.`);
+              for (const member of members) {
+                this.queueMessage(sock, member.jid, cloned, rule);
+              }
             }
-          }
         } else {
-          for (const targetId of targets) {
-            this.queueMessage(sock, targetId, msg, rule);
-          }
+          this.addToBatch(sock, rule, msg, targets);
         }
       }
     } catch (err) {
@@ -124,11 +148,41 @@ class BroadcastManager {
     }
   }
 
+  addToBatch(sock, rule, msg, targets) {
+    const ruleId = rule._id.toString();
+    if (!this.batchBuffer[ruleId]) {
+      this.batchBuffer[ruleId] = { messages: [], timer: null, targets: [], sock, rule };
+    }
+    const batch = this.batchBuffer[ruleId];
+    batch.messages.push(cloneMsg(msg));
+    batch.targets = targets;
+    batch.sock = sock;
+    batch.rule = rule;
+
+    if (batch.timer) clearTimeout(batch.timer);
+    batch.timer = setTimeout(() => this.processBatch(ruleId), BATCH_DELAY_MS);
+  }
+
+  async processBatch(ruleId) {
+    const batch = this.batchBuffer[ruleId];
+    if (!batch || !batch.messages.length) return;
+    delete this.batchBuffer[ruleId];
+
+    logger.info(`Batch "${batch.rule.name}": ${batch.messages.length} msg(s) → ${batch.targets.length} groupe(s)`);
+
+    for (const targetId of batch.targets) {
+      for (const msg of batch.messages) {
+        this.queueMessage(batch.sock, targetId, msg, batch.rule);
+      }
+    }
+  }
+
   async processQueue() {
     this.isProcessing = true;
+    let batchLogTimer = Date.now();
     while (this.messageQueue.length) {
       if (!this.canSend()) {
-        logger.warn("Limite messages/minute atteinte, pause 10s...");
+        logger.warn(`File: ${this.messageQueue.length} en attente, limite atteinte, pause 10s...`);
         await this.sleep(10000);
         continue;
       }
@@ -148,10 +202,16 @@ class BroadcastManager {
         await sock.sendPresenceUpdate("composing", targetId);
         await this.sleep(800 + Math.random() * 1200);
 
+        const msgType = Object.keys(msg.message || {})[0] || "?";
         await this.forwardMessage(sock, targetId, msg, rule);
 
         this.messageWindow.push(Date.now());
         this.messageCount++;
+
+        if (Date.now() - batchLogTimer > 10000) {
+          logger.info(`File: ${this.messageQueue.length} restant(s), ${this.messageCount} envoyé(s)`);
+          batchLogTimer = Date.now();
+        }
       } catch (err) {
         logger.error(`Erreur envoi vers ${targetId}: ${err.message}`);
         const errMsg = err.message || "";
@@ -183,31 +243,35 @@ class BroadcastManager {
     const caption = this.getMessageText(msgContent);
 
     if (rule.includeMedia && msgType) {
+      logger.info(`[MEDIA] Type=${msgType}, caption="${caption.substring(0, 40)}", cible=${targetId.split("@")[0]}`);
       try {
         switch (msgType) {
           case "imageMessage": {
-            const stream = await downloadMediaMessage(msg, "buffer", {}, { logger, reuploadRequest: sock?.updateMediaMessage });
+            logger.info(`[MEDIA] Téléchargement image...`);
+            const stream = await downloadMediaMessage(msg, "buffer", {}, { logger });
+            logger.info(`[MEDIA] Image téléchargée (${Buffer.isBuffer(stream) ? stream.length + " bytes" : typeof stream}), envoi...`);
             await sock.sendMessage(targetId, { image: stream, caption });
+            logger.info(`[MEDIA] Image envoyée OK`);
             return;
           }
           case "videoMessage": {
-            const stream = await downloadMediaMessage(msg, "buffer", {}, { logger, reuploadRequest: sock?.updateMediaMessage });
+            const stream = await downloadMediaMessage(msg, "buffer", {}, { logger });
             await sock.sendMessage(targetId, { video: stream, caption });
             return;
           }
           case "ptvMessage": {
-            const stream = await downloadMediaMessage(msg, "buffer", {}, { logger, reuploadRequest: sock?.updateMediaMessage });
+            const stream = await downloadMediaMessage(msg, "buffer", {}, { logger });
             await sock.sendMessage(targetId, { video: stream, ptv: true });
             return;
           }
           case "audioMessage": {
-            const stream = await downloadMediaMessage(msg, "buffer", {}, { logger, reuploadRequest: sock?.updateMediaMessage });
+            const stream = await downloadMediaMessage(msg, "buffer", {}, { logger });
             const ptt = !!msgContent.audioMessage?.ptt;
             await sock.sendMessage(targetId, { audio: stream, ptt });
             return;
           }
           case "documentMessage": {
-            const stream = await downloadMediaMessage(msg, "buffer", {}, { logger, reuploadRequest: sock?.updateMediaMessage });
+            const stream = await downloadMediaMessage(msg, "buffer", {}, { logger });
             const doc = msgContent.documentMessage;
             await sock.sendMessage(targetId, {
               document: stream,
@@ -218,7 +282,7 @@ class BroadcastManager {
             return;
           }
           case "stickerMessage": {
-            const stream = await downloadMediaMessage(msg, "buffer", {}, { logger, reuploadRequest: sock?.updateMediaMessage });
+            const stream = await downloadMediaMessage(msg, "buffer", {}, { logger });
             await sock.sendMessage(targetId, { sticker: stream });
             return;
           }
@@ -271,14 +335,14 @@ class BroadcastManager {
               return;
             }
             try {
-              const stream = await downloadMediaMessage(msg, "buffer", {}, { logger, reuploadRequest: sock?.updateMediaMessage });
+              const stream = await downloadMediaMessage(msg, "buffer", {}, { logger });
               await sock.sendMessage(targetId, { document: stream, fileName: "media", mimetype: "application/octet-stream" });
               return;
             } catch {}
           }
         }
       } catch (err) {
-        logger.warn(`Échec téléchargement média: ${err.message}`);
+        logger.warn(`[MEDIA] Échec média: ${err.message}`);
       }
     }
 

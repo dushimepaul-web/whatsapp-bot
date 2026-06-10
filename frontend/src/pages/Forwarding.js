@@ -27,8 +27,10 @@ const Forwarding = () => {
       setRules(r.data.rules || []);
       if (showmsg) alert(`Groupes chargés: ${groupsData.length}`);
     } catch (e) {
-      console.error("Erreur chargement:", e);
-      if (showmsg) alert(`Erreur: ${e.message}`);
+      if (e.code !== "ERR_CANCELED" && e.message !== "Request aborted") {
+        console.error("Erreur chargement:", e);
+        if (showmsg) alert(`Erreur: ${e.message}`);
+      }
     }
   };
 
