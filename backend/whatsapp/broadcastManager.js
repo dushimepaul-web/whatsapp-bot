@@ -39,6 +39,9 @@ const getRealMessage = (message) => {
 };
 
 const BATCH_DELAY_MS = 3000;
+const MAX_MEDIA_SIZE = 100 * 1024 * 1024;
+const MAX_CACHE_SIZE = 5;
+const DOWNLOAD_TIMEOUT_MS = 10 * 60 * 1000;
 
 class BroadcastManager {
   constructor() {
@@ -47,6 +50,7 @@ class BroadcastManager {
     this.messageCount = 0;
     this.messageWindow = [];
     this.batchBuffer = {};
+    this.mediaCache = new Map();
   }
 
   async handleIncoming(sock, msg, from, userId) {
@@ -144,7 +148,7 @@ class BroadcastManager {
   queueMessage(sock, targetId, msg, rule) {
     this.messageQueue.push({ sock, targetId, msg, rule });
     if (!this.isProcessing) {
-      this.processQueue();
+      this.processQueue().catch(e => logger.error("processQueue crash:", e));
     }
   }
 
@@ -160,7 +164,7 @@ class BroadcastManager {
     batch.rule = rule;
 
     if (batch.timer) clearTimeout(batch.timer);
-    batch.timer = setTimeout(() => this.processBatch(ruleId), BATCH_DELAY_MS);
+    batch.timer = setTimeout(() => this.processBatch(ruleId).catch(e => logger.error("processBatch crash:", e)), BATCH_DELAY_MS);
   }
 
   async processBatch(ruleId) {
@@ -218,11 +222,15 @@ class BroadcastManager {
         if (errMsg.includes("Closed") || errMsg.includes("closed") || errMsg.includes("not opened") || errMsg.includes("conflict")) {
           logger.warn("Déconnexion détectée lors de l'envoi. Vidage de la file d'attente.");
           this.messageQueue = [];
+          this.mediaCache.clear();
           break;
         }
       }
     }
     this.isProcessing = false;
+    if (this.mediaCache.size > 0) {
+      this.mediaCache.clear();
+    }
   }
 
   getMessageText(msgContent) {
@@ -234,6 +242,37 @@ class BroadcastManager {
     return "";
   }
 
+  async getCachedMedia(msg) {
+    const cacheKey = msg.key?.id;
+    if (cacheKey && this.mediaCache.has(cacheKey)) {
+      logger.info(`[MEDIA] Cache HIT pour ${cacheKey}`);
+      return this.mediaCache.get(cacheKey);
+    }
+
+    const msgContent = getRealMessage(msg.message);
+    const content = msgContent?.imageMessage || msgContent?.videoMessage || msgContent?.audioMessage || msgContent?.documentMessage || msgContent?.stickerMessage;
+    if (content?.fileLength && content.fileLength > MAX_MEDIA_SIZE) {
+      logger.warn(`[MEDIA] Fichier trop volumineux: ${(content.fileLength / 1024 / 1024).toFixed(1)}MB, max ${MAX_MEDIA_SIZE / 1024 / 1024}MB. Envoi du texte uniquement.`);
+      return null;
+    }
+
+    logger.info(`[MEDIA] Téléchargement média...`);
+    const promise = downloadMediaMessage(msg, "buffer", {}, { logger });
+    const stream = await Promise.race([
+      promise,
+      new Promise((_, reject) => setTimeout(() => reject(new Error("Timeout téléchargement média")), DOWNLOAD_TIMEOUT_MS)),
+    ]);
+    if (cacheKey) {
+      if (this.mediaCache.size >= MAX_CACHE_SIZE) {
+        const firstKey = this.mediaCache.keys().next().value;
+        this.mediaCache.delete(firstKey);
+      }
+      this.mediaCache.set(cacheKey, stream);
+    }
+    logger.info(`[MEDIA] Téléchargé: ${Buffer.isBuffer(stream) ? (stream.length / 1024 / 1024).toFixed(1) + "MB" : typeof stream}`);
+    return stream;
+  }
+
   async forwardMessage(sock, targetId, msg, rule) {
     const rawContent = msg.message;
     const msgContent = getRealMessage(rawContent);
@@ -242,48 +281,51 @@ class BroadcastManager {
     const msgType = this.getMessageType(msgContent);
     const caption = this.getMessageText(msgContent);
 
-    if (rule.includeMedia && msgType) {
+    if (rule.includeMedia && msgType && msgType !== "protocolMessage") {
       logger.info(`[MEDIA] Type=${msgType}, caption="${caption.substring(0, 40)}", cible=${targetId.split("@")[0]}`);
       try {
         switch (msgType) {
           case "imageMessage": {
-            logger.info(`[MEDIA] Téléchargement image...`);
-            const stream = await downloadMediaMessage(msg, "buffer", {}, { logger });
-            logger.info(`[MEDIA] Image téléchargée (${Buffer.isBuffer(stream) ? stream.length + " bytes" : typeof stream}), envoi...`);
-            await sock.sendMessage(targetId, { image: stream, caption });
-            logger.info(`[MEDIA] Image envoyée OK`);
+            const stream = await this.getCachedMedia(msg);
+            if (!stream) break;
+            await sock.sendMessage(targetId, { image: stream, caption }).catch(e => logger.warn(`[MEDIA] Échec envoi image: ${e.message}`));
             return;
           }
           case "videoMessage": {
-            const stream = await downloadMediaMessage(msg, "buffer", {}, { logger });
-            await sock.sendMessage(targetId, { video: stream, caption });
+            const stream = await this.getCachedMedia(msg);
+            if (!stream) break;
+            await sock.sendMessage(targetId, { video: stream, caption }).catch(e => logger.warn(`[MEDIA] Échec envoi video: ${e.message}`));
             return;
           }
           case "ptvMessage": {
-            const stream = await downloadMediaMessage(msg, "buffer", {}, { logger });
-            await sock.sendMessage(targetId, { video: stream, ptv: true });
+            const stream = await this.getCachedMedia(msg);
+            if (!stream) break;
+            await sock.sendMessage(targetId, { video: stream, ptv: true }).catch(e => logger.warn(`[MEDIA] Échec envoi ptv: ${e.message}`));
             return;
           }
           case "audioMessage": {
-            const stream = await downloadMediaMessage(msg, "buffer", {}, { logger });
+            const stream = await this.getCachedMedia(msg);
+            if (!stream) break;
             const ptt = !!msgContent.audioMessage?.ptt;
-            await sock.sendMessage(targetId, { audio: stream, ptt });
+            await sock.sendMessage(targetId, { audio: stream, ptt }).catch(e => logger.warn(`[MEDIA] Échec envoi audio: ${e.message}`));
             return;
           }
           case "documentMessage": {
-            const stream = await downloadMediaMessage(msg, "buffer", {}, { logger });
+            const stream = await this.getCachedMedia(msg);
+            if (!stream) break;
             const doc = msgContent.documentMessage;
             await sock.sendMessage(targetId, {
               document: stream,
               fileName: doc?.fileName || "document",
               mimetype: doc?.mimetype || "application/octet-stream",
               caption,
-            });
+            }).catch(e => logger.warn(`[MEDIA] Échec envoi document: ${e.message}`));
             return;
           }
           case "stickerMessage": {
-            const stream = await downloadMediaMessage(msg, "buffer", {}, { logger });
-            await sock.sendMessage(targetId, { sticker: stream });
+            const stream = await this.getCachedMedia(msg);
+            if (!stream) break;
+            await sock.sendMessage(targetId, { sticker: stream }).catch(e => logger.warn(`[MEDIA] Échec envoi sticker: ${e.message}`));
             return;
           }
           case "pollCreationMessage": {
@@ -294,7 +336,7 @@ class BroadcastManager {
                 values: poll.options.map(o => o.optionName),
                 selectableOptionsCount: poll.selectableOptionsCount
               }
-            });
+            }).catch(e => logger.warn(`[MEDIA] Échec envoi poll: ${e.message}`));
             return;
           }
           case "locationMessage": {
@@ -306,7 +348,7 @@ class BroadcastManager {
                 name: loc.name || "",
                 address: loc.address || ""
               }
-            });
+            }).catch(e => logger.warn(`[MEDIA] Échec envoi location: ${e.message}`));
             return;
           }
           case "contactMessage": {
@@ -316,7 +358,7 @@ class BroadcastManager {
                 displayName: con.displayName,
                 contacts: [{ vcard: con.vcard }]
               }
-            });
+            }).catch(e => logger.warn(`[MEDIA] Échec envoi contact: ${e.message}`));
             return;
           }
           case "contactsArrayMessage": {
@@ -326,19 +368,21 @@ class BroadcastManager {
                 displayName: con.displayName,
                 contacts: con.contacts.map(c => ({ vcard: c.vcard }))
               }
-            });
+            }).catch(e => logger.warn(`[MEDIA] Échec envoi contacts: ${e.message}`));
             return;
           }
           default: {
             if (caption) {
-              await sock.sendMessage(targetId, { text: caption });
+              await sock.sendMessage(targetId, { text: caption }).catch(() => {});
               return;
             }
             try {
-              const stream = await downloadMediaMessage(msg, "buffer", {}, { logger });
-              await sock.sendMessage(targetId, { document: stream, fileName: "media", mimetype: "application/octet-stream" });
-              return;
+              const stream = await this.getCachedMedia(msg);
+              if (stream) {
+                await sock.sendMessage(targetId, { document: stream, fileName: "media", mimetype: "application/octet-stream" }).catch(() => {});
+              }
             } catch {}
+            return;
           }
         }
       } catch (err) {
@@ -347,7 +391,7 @@ class BroadcastManager {
     }
 
     if (caption) {
-      await sock.sendMessage(targetId, { text: caption });
+      await sock.sendMessage(targetId, { text: caption }).catch(e => logger.warn(`[MEDIA] Échec envoi texte: ${e.message}`));
     }
   }
 
