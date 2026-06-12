@@ -1,15 +1,15 @@
 const Group = require("../models/Group");
 const Member = require("../models/Member");
-const whatsappService = require("../services/whatsappService");
 const logger = require("../utils/logger");
 
 class GroupManager {
-  async refreshGroups() {
-    return whatsappService.syncGroups();
+  async refreshGroups(userId) {
+    const whatsappService = require("../services/whatsappService");
+    return whatsappService.syncGroups(userId);
   }
 
-  async getGroups({ page = 1, limit = 50, search } = {}) {
-    const query = {};
+  async getGroups({ page = 1, limit = 50, search, userId } = {}) {
+    const query = { userId };
     if (search) {
       query.name = { $regex: search, $options: "i" };
     }
@@ -21,25 +21,25 @@ class GroupManager {
     return { groups, total, page, pages: Math.ceil(total / limit) };
   }
 
-  async getGroupById(groupId) {
-    const group = await Group.findOne({ groupId });
+  async getGroupById(groupId, userId) {
+    const group = await Group.findOne({ groupId, userId });
     if (!group) throw new Error("Groupe introuvable");
     return group;
   }
 
-  async getGroupMembers(groupId) {
-    const group = await Group.findOne({ groupId });
+  async getGroupMembers(groupId, userId) {
+    const group = await Group.findOne({ groupId, userId });
     if (!group) throw new Error("Groupe introuvable");
-    return Member.find({ groupId }).sort({ name: 1 });
+    return Member.find({ groupId, userId }).sort({ name: 1 });
   }
 
-  async getGroupAdmins(groupId) {
-    return Member.find({ groupId, isAdmin: true }).sort({ name: 1 });
+  async getGroupAdmins(groupId, userId) {
+    return Member.find({ groupId, userId, isAdmin: true }).sort({ name: 1 });
   }
 
-  async getStats() {
-    const totalGroups = await Group.countDocuments();
-    const totalMembers = await Member.countDocuments();
+  async getStats(userId) {
+    const totalGroups = await Group.countDocuments({ userId });
+    const totalMembers = await Member.countDocuments({ userId });
     return { totalGroups, totalMembers };
   }
 

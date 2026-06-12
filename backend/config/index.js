@@ -10,7 +10,7 @@ refreshSecret: process.env.JWT_REFRESH_SECRET || (() => { throw new Error("JWT_R
     refreshExpire: process.env.JWT_REFRESH_EXPIRE || "7d",
   },
   whatsapp: {
-    prefix: process.env.WHATSAPP_PREFIX || ">",
+    prefix: process.env.WHATSAPP_PREFIX || "/",
   },
   rateLimit: {
     windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 60000,
@@ -27,4 +27,5 @@ refreshSecret: process.env.JWT_REFRESH_SECRET || (() => { throw new Error("JWT_R
     })(),
   },
   env: process.env.NODE_ENV || "development",
+  consoleAllowedPhones: (process.env.CONSOLE_ALLOWED_PHONES || "").split(",").map(s => s.trim()).filter(Boolean),
 };

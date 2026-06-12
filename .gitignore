@@ -5,6 +5,9 @@ node_modules
 auth_info
 auth_info/
 
+# Media cache
+media_cache/
+
 # Logs
 logs/
 *.log

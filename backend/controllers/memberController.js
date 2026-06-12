@@ -9,7 +9,7 @@ exports.list = async (req, res) => {
     let { groupId, search, page = 1, limit = 50 } = req.query;
     page = Math.max(1, parseInt(page) || 1);
     limit = Math.min(100, Math.max(1, parseInt(limit) || 50));
-    const query = {};
+    const query = { userId: req.user._id };
     if (groupId) query.groupId = groupId;
     if (search) {
       const safe = escapeRegex(search);
@@ -37,20 +37,19 @@ exports.sendMessage = async (req, res) => {
     if (!jids?.length || !text) {
       return res.status(400).json({ error: "Destinataires et texte requis" });
     }
-    const sock = whatsappService.getSocket();
+    const userId = req.user._id;
+    const sock = whatsappService.getSocket(userId);
     if (!sock) return res.status(400).json({ error: "WhatsApp non connecté" });
 
     const results = [];
     for (const jid of jids) {
       try {
-        // Anti-ban: Simulation d'écriture
-        await sock.sendPresenceUpdate("composing", jid);
+        try { await sock.sendPresenceUpdate("composing", jid); } catch {}
         await new Promise((r) => setTimeout(r, 1000 + Math.random() * 1000));
 
         await sock.sendMessage(jid, { text });
         results.push({ jid, success: true });
 
-        // Anti-ban: Délai variable après envoi (1.5 à 3.5 secondes)
         await new Promise((r) => setTimeout(r, 1500 + Math.random() * 2000));
       } catch (err) {
         results.push({ jid, success: false, error: err.message });
@@ -58,7 +57,7 @@ exports.sendMessage = async (req, res) => {
     }
 
     await logger.db({
-      userId: req.user._id,
+      userId,
       type: "message",
       action: "member_message_sent",
       details: { count: jids.length, success: results.filter((r) => r.success).length },

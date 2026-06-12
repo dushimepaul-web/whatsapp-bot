@@ -1,8 +1,10 @@
 import React, { useState, useEffect } from "react";
 import api from "../services/api";
 import { formatDate } from "../utils/helpers";
+import { useMediaQuery } from "../hooks/useMediaQuery";
 
 const BroadcastCenter = () => {
+  const isMobile = useMediaQuery("(max-width: 768px)");
   const [tab, setTab] = useState("new");
   const [groups, setGroups] = useState([]);
   const [broadcasts, setBroadcasts] = useState([]);
@@ -48,7 +50,7 @@ const BroadcastCenter = () => {
       </div>
 
       {tab === "new" && (
-        <div style={styles.form}>
+        <div style={styles.form(isMobile)}>
           <div style={styles.formGroup}>
             <label style={styles.label}>Type de message</label>
             <select style={styles.select} value={form.type} onChange={(e) => setForm({ ...form, type: e.target.value })}>
@@ -130,7 +132,7 @@ const styles = {
   pageTitle: { fontSize: 22, fontWeight: 700, color: "#111b21", marginBottom: 16 },
   tabs: { display: "flex", gap: 0, marginBottom: 20, backgroundColor: "#fff", borderRadius: "10px 10px 0 0", overflow: "hidden" },
   tab: { flex: 1, padding: "12px 20px", backgroundColor: "#fff", border: "none", fontSize: 14, fontWeight: 500, cursor: "pointer" },
-  form: { backgroundColor: "#fff", borderRadius: 10, padding: 24, boxShadow: "0 1px 3px rgba(0,0,0,0.08)" },
+  form: (isMobile) => ({ backgroundColor: "#fff", borderRadius: 10, padding: isMobile ? 16 : 24, boxShadow: "0 1px 3px rgba(0,0,0,0.08)" }),
   formGroup: { marginBottom: 16 },
   label: { display: "block", fontSize: 13, fontWeight: 600, color: "#111b21", marginBottom: 6 },
   input: { width: "100%", padding: "10px 14px", border: "1px solid #e0e0e0", borderRadius: 8, fontSize: 14, outline: "none" },

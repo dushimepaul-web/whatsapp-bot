@@ -1,25 +1,45 @@
-import React from "react";
+import React, { useState, useEffect } from "react";
 import { NavLink } from "react-router-dom";
 import { useAuth } from "../hooks/useAuth";
-
-const links = [
-  { to: "/", label: "Dashboard", icon: "bi bi-grid-1x2-fill" },
-  { to: "/groups", label: "Groupes", icon: "bi bi-people-fill" },
-  { to: "/members", label: "Membres", icon: "bi bi-person-circle" },
-  { to: "/broadcast", label: "Broadcast", icon: "bi bi-send-fill" },
-  { to: "/forwarding", label: "Diffusion", icon: "bi bi-arrow-left-right" },
-  { to: "/logs", label: "Logs", icon: "bi bi-terminal-fill" },
-  { to: "/settings", label: "Paramètres", icon: "bi bi-gear-wide-connected" },
-];
+import { useSidebar } from "../context/SidebarContext";
+import { useMediaQuery } from "../hooks/useMediaQuery";
+import api from "../services/api";
 
 const Sidebar = () => {
   const { user, logout } = useAuth();
+  const { setSidebarOpen } = useSidebar();
+  const isMobile = useMediaQuery("(max-width: 768px)");
+  const [consoleAllowed, setConsoleAllowed] = useState(false);
+
+  useEffect(() => {
+    api.get("/settings/console-access").then((res) => {
+      setConsoleAllowed(res.data.allowed);
+    }).catch(() => {});
+  }, []);
+
+  const links = [
+    { to: "/", label: "Dashboard", icon: "bi bi-grid-1x2-fill" },
+    { to: "/groups", label: "Groupes", icon: "bi bi-people-fill" },
+    { to: "/members", label: "Membres", icon: "bi bi-person-circle" },
+    { to: "/broadcast", label: "Broadcast", icon: "bi bi-send-fill" },
+    { to: "/forwarding", label: "Diffusion", icon: "bi bi-arrow-left-right" },
+    { to: "/logs", label: "Logs", icon: "bi bi-journal-text" },
+    ...(consoleAllowed ? [{ to: "/console", label: "Console", icon: "bi bi-terminal-fill" }] : []),
+    { to: "/settings", label: "Paramètres", icon: "bi bi-gear-wide-connected" },
+  ];
+
+  const handleNav = () => { if (isMobile) setSidebarOpen(false); };
 
   return (
     <div style={styles.sidebar}>
       <div style={styles.brand}>
         <span style={styles.brandIcon}><i className="bi bi-whatsapp"></i></span>
         <span style={styles.brandText}>WhatsApp Bot <span style={styles.brandBadge}>PRO</span></span>
+        {isMobile && (
+          <button onClick={() => setSidebarOpen(false)} style={styles.closeBtn}>
+            <i className="bi bi-x-lg"></i>
+          </button>
+        )}
       </div>
       <nav style={styles.nav}>
         {links.map((link) => (
@@ -27,6 +47,7 @@ const Sidebar = () => {
             key={link.to}
             to={link.to}
             end={link.to === "/"}
+            onClick={handleNav}
             style={({ isActive }) => ({
               ...styles.link,
               backgroundColor: isActive ? "#2a3942" : "transparent",
@@ -86,7 +107,12 @@ const styles = {
     color: "#e9edef",
     display: "flex",
     alignItems: "center",
-    gap: 6
+    gap: 6,
+    flex: 1
+  },
+  closeBtn: {
+    background: "none", border: "none", color: "#aebac1",
+    fontSize: 14, cursor: "pointer", padding: 4
   },
   brandBadge: {
     fontSize: 9,

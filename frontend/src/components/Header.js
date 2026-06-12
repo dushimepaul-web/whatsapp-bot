@@ -1,11 +1,15 @@
 import React, { useState, useEffect } from "react";
 import { useSocket } from "../hooks/useSocket";
 import api from "../services/api";
+import { useSidebar } from "../context/SidebarContext";
+import { useMediaQuery } from "../hooks/useMediaQuery";
 
 const Header = () => {
   const { socket, connected: socketConnected } = useSocket();
   const [status, setStatus] = useState("disconnected");
   const [phone, setPhone] = useState(null);
+  const { setSidebarOpen } = useSidebar();
+  const isMobile = useMediaQuery("(max-width: 768px)");
 
   useEffect(() => {
     const fetchStatus = async () => {
@@ -31,8 +35,13 @@ const Header = () => {
   return (
     <div style={styles.header}>
       <div style={styles.titleArea}>
-        <h1 style={styles.title}>Console de Gestion</h1>
-        <span style={styles.subtitle}>Supervision et contrôle en temps réel</span>
+        <button onClick={() => setSidebarOpen(true)} style={styles.hamburger}>
+          <i className="bi bi-list"></i>
+        </button>
+        <div>
+          <h1 style={styles.title}>Console de Gestion</h1>
+          <span style={styles.subtitle}>Supervision et contrôle en temps réel</span>
+        </div>
       </div>
       <div style={styles.statusGroup}>
         <div style={{ ...styles.statusBadge, backgroundColor: statusBgColors[status] || "#f8d7da", color: statusColors[status] || "#ea4335" }}>
@@ -57,12 +66,20 @@ const styles = {
     padding: "16px 24px", 
     backgroundColor: "#fff", 
     borderBottom: "1px solid #e9edef",
-    boxShadow: "0 1px 3px rgba(11,20,26,0.08)"
+    boxShadow: "0 1px 3px rgba(11,20,26,0.08)",
+    gap: 12,
+    flexWrap: "wrap"
   },
   titleArea: {
     display: "flex",
-    flexDirection: "column",
-    gap: 2
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10
+  },
+  hamburger: {
+    background: "none", border: "none", fontSize: 24,
+    color: "#111b21", cursor: "pointer", padding: "4px 8px 4px 0",
+    display: "flex"
   },
   title: {
     fontSize: 16,

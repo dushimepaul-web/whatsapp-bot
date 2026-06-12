@@ -1,7 +1,9 @@
 import React, { useState, useEffect } from "react";
 import api from "../services/api";
+import { useMediaQuery } from "../hooks/useMediaQuery";
 
 const Members = () => {
+  const isMobile = useMediaQuery("(max-width: 768px)");
   const [members, setMembers] = useState([]);
   const [search, setSearch] = useState("");
   const [selected, setSelected] = useState([]);
@@ -52,8 +54,8 @@ const Members = () => {
         <input style={styles.search} type="text" placeholder="Rechercher un membre..." value={search} onChange={(e) => setSearch(e.target.value)} />
         <span style={styles.count}>{filtered.length} membres</span>
       </div>
-      <div style={styles.split}>
-        <div style={styles.listPanel}>
+      <div style={styles.split(isMobile)}>
+        <div style={{ ...styles.listPanel, maxHeight: isMobile ? "300px" : styles.listPanel.maxHeight }}>
           <div style={styles.selectAll}>
             <label style={styles.checkboxLabel}>
               <input type="checkbox" checked={selected.length === filtered.length && filtered.length > 0} onChange={selectAll} />
@@ -95,7 +97,7 @@ const styles = {
   toolbar: { display: "flex", alignItems: "center", gap: 12, marginBottom: 16 },
   search: { flex: 1, padding: "10px 16px", border: "1px solid #e0e0e0", borderRadius: 8, fontSize: 14, outline: "none" },
   count: { fontSize: 13, color: "#667781", whiteSpace: "nowrap" },
-  split: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20 },
+  split: (isMobile) => ({ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr", gap: 20 }),
   listPanel: { backgroundColor: "#fff", borderRadius: 10, padding: 16, boxShadow: "0 1px 3px rgba(0,0,0,0.08)", maxHeight: "calc(100vh - 180px)", overflow: "auto" },
   selectAll: { padding: "8px 0", borderBottom: "1px solid #f0f2f5", marginBottom: 8 },
   checkboxLabel: { display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "#667781", cursor: "pointer" },

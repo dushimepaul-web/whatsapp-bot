@@ -1,7 +1,9 @@
 import React, { useState, useEffect } from "react";
 import api from "../services/api";
+import { useMediaQuery } from "../hooks/useMediaQuery";
 
 const Forwarding = () => {
+  const isMobile = useMediaQuery("(max-width: 768px)");
   const [rules, setRules] = useState([]);
   const [groups, setGroups] = useState([]);
   const [showForm, setShowForm] = useState(false);
@@ -113,7 +115,7 @@ const Forwarding = () => {
 
   return (
     <div style={styles.container}>
-      <div style={styles.header}>
+      <div style={styles.header(isMobile)}>
         <div style={styles.headerInfo}>
           <h2 style={styles.pageTitle}>Règles de diffusion</h2>
           <span style={styles.pageSubtitle}>Configurez le transfert automatique en temps réel de vos messages</span>
@@ -139,7 +141,7 @@ const Forwarding = () => {
             <i className="bi bi-sliders" style={{ marginRight: 8, color: "#00a884" }}></i>
             {editing ? "Modifier la règle" : "Créer une règle de transfert"}
           </h3>
-          <div style={styles.formGrid}>
+          <div style={styles.formGrid(isMobile)}>
             <div style={styles.field}>
               <label style={styles.label}>Nom de la règle</label>
               <input style={styles.input} value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Ex: Groupe Master vers Diffusions" />
@@ -200,7 +202,7 @@ const Forwarding = () => {
 
           <div style={styles.checkSection}>
             <h4 style={styles.checkTitle}>Options de transfert</h4>
-            <div style={styles.checkGrid}>
+            <div style={styles.checkGrid(isMobile)}>
               <label style={styles.checkLabel}>
                 <input type="checkbox" style={styles.checkbox} checked={form.masterGroup} onChange={(e) => setForm({ ...form, masterGroup: e.target.checked })} />
                 <div style={styles.checkTexts}>
@@ -284,7 +286,7 @@ const Forwarding = () => {
               </div>
             </div>
             <div style={styles.cardBody}>
-              <div style={styles.cardInfoGrid}>
+              <div style={styles.cardInfoGrid(isMobile)}>
                 <p style={styles.cardLine}>
                   <strong>Groupe Source :</strong> <span style={styles.highlightText}>{getGroupName(rule.sourceGroupId)}</span>
                 </p>
@@ -318,7 +320,7 @@ const styles = {
     flexDirection: "column",
     gap: 16
   },
-  header: { display: "flex", justifyContent: "space-between", alignItems: "center" },
+  header: (isMobile) => ({ display: "flex", justifyContent: "space-between", alignItems: isMobile ? "stretch" : "center", flexDirection: isMobile ? "column" : "row", gap: 12 }),
   headerInfo: { display: "flex", flexDirection: "column", gap: 4 },
   pageTitle: { fontSize: 24, fontWeight: 700, color: "#111b21", margin: 0 },
   pageSubtitle: { fontSize: 13, color: "#667781" },
@@ -351,7 +353,7 @@ const styles = {
     display: "flex",
     alignItems: "center"
   },
-  formGrid: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 },
+  formGrid: (isMobile) => ({ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr", gap: 16 }),
   field: { display: "flex", flexDirection: "column", gap: 6 },
   label: { fontSize: 12, fontWeight: 600, color: "#54656f" },
   input: { 
@@ -407,11 +409,11 @@ const styles = {
     margin: 0,
     textTransform: "uppercase"
   },
-  checkGrid: {
+  checkGrid: (isMobile) => ({
     display: "grid",
-    gridTemplateColumns: "1fr 1fr",
+    gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr",
     gap: 16
-  },
+  }),
   checkLabel: { 
     display: "flex", 
     alignItems: "flex-start", 
@@ -501,12 +503,12 @@ const styles = {
   cardActions: { display: "flex", gap: 6 },
   smallBtn: { background: "none", border: "none", cursor: "pointer", fontSize: 16, padding: "4px 6px" },
   cardBody: { display: "flex", flexDirection: "column", gap: 10 },
-  cardInfoGrid: {
+  cardInfoGrid: (isMobile) => ({
     display: "grid",
-    gridTemplateColumns: "1fr 1fr",
+    gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr",
     gap: 12,
     fontSize: 13
-  },
+  }),
   cardLine: { margin: 0, color: "#54656f" },
   highlightText: { color: "#111b21", fontWeight: 600 },
   cardFooterOptions: {

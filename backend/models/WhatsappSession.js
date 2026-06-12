@@ -9,4 +9,6 @@ const whatsappSessionSchema = new mongoose.Schema({
   lastSync: { type: Date },
 }, { timestamps: true });
 
+whatsappSessionSchema.index({ userId: 1 });
+
 module.exports = mongoose.model("WhatsappSession", whatsappSessionSchema);

@@ -4,6 +4,7 @@ const config = require("../config");
 const User = require("../models/User");
 const whatsappService = require("../services/whatsappService");
 const broadcastManager = require("../whatsapp/broadcastManager");
+const logHub = require("../utils/logHub");
 const logger = require("../utils/logger");
 
 let io = null;
@@ -29,29 +30,30 @@ const setupSocket = (server) => {
 
   io.on("connection", (socket) => {
     logger.info(`Socket connecté: ${socket.user.email}`);
-
     socket.join(`user:${socket.user._id}`);
+
+    const userId = socket.user._id;
+
+    whatsappService.setQrCallback(userId, (qr) => {
+      emitToUser(userId, "whatsapp:qr", { qr });
+    });
+
+    whatsappService.setStatusCallback(userId, (status) => {
+      emitToUser(userId, "whatsapp:status", { status });
+    });
+
+    whatsappService.setPairingCodeCallback(userId, (code) => {
+      emitToUser(userId, "whatsapp:pairingCode", { code });
+    });
 
     socket.on("disconnect", () => {
       logger.info(`Socket déconnecté: ${socket.user.email}`);
     });
   });
 
-  whatsappService.setQrCallback((qr) => {
-    if (io && whatsappService.userId) {
-      emitToUser(whatsappService.userId, "whatsapp:qr", { qr });
-    }
-  });
-
-  whatsappService.setStatusCallback((status) => {
-    if (io && whatsappService.userId) {
-      emitToUser(whatsappService.userId, "whatsapp:status", { status });
-    }
-  });
-
-  whatsappService.setPairingCodeCallback((code) => {
-    if (io && whatsappService.userId) {
-      emitToUser(whatsappService.userId, "whatsapp:pairingCode", { code });
+  logHub.on("log", (data) => {
+    if (io) {
+      io.emit("log:new", data);
     }
   });
 

@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from "react";
 import { useSocket } from "../hooks/useSocket";
+import { useMediaQuery } from "../hooks/useMediaQuery";
 import api from "../services/api";
 import StatusCard from "../components/StatusCard";
 
@@ -8,32 +9,59 @@ let activityIdCounter = 0;
 
 const Dashboard = () => {
   const { socket } = useSocket();
-  const [stats, setStats] = useState({ groups: 0, members: 0, broadcastSent: 0, moderation: 0 });
+  const isMobile = useMediaQuery("(max-width: 768px)");
+  const [stats, setStats] = useState({ groups: 0, members: 0, broadcastSent: 0, moderation: 0, users: 0 });
   const [whatsapp, setWhatsapp] = useState({ status: "disconnected", qr: null, phone: null });
   const [logs, setLogs] = useState([]);
   const [phoneNumber, setPhoneNumber] = useState("");
   const [pairingCode, setPairingCode] = useState(null);
   const [loading, setLoading] = useState(INITIAL_LOADING);
   const [forwardActivity, setForwardActivity] = useState([]);
+  const [forwardingActive, setForwardingActive] = useState(false);
+  const [stoppingForward, setStoppingForward] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [pageLoading, setPageLoading] = useState(true);
   const connectPollRef = useRef(null);
   const pairPollRef = useRef(null);
+  const statusPollRef = useRef(null);
+
+  const fetchStatus = async () => {
+    try {
+      const wa = await api.get("/whatsapp/status");
+      setWhatsapp((s) => {
+        const newStatus = wa.data.session?.status || "disconnected";
+        if (newStatus !== s.status) {
+          return { ...s, status: newStatus, qr: newStatus === "connected" ? null : (wa.data.session?.qrCode || s.qr), phone: wa.data.phone || s.phone };
+        }
+        return s;
+      });
+    } catch {}
+  };
+
+  const checkActiveRules = async () => {
+    try {
+      const res = await api.get("/forwarding");
+      const active = (res.data?.rules || []).some((r) => r.isActive);
+      setForwardingActive(active);
+    } catch {}
+  };
 
   useEffect(() => {
     const load = async () => {
       try {
-        const [grp, brd, wa, logsRes] = await Promise.all([
+        const [grp, brd, wa, logsRes, usr] = await Promise.all([
           api.get("/groups/stats"),
           api.get("/broadcast/stats"),
           api.get("/whatsapp/status"),
           api.get("/logs", { params: { limit: 10 } }),
+          api.get("/auth/stats"),
         ]);
         setStats({ 
           groups: grp.data.totalGroups || 0, 
           members: grp.data.totalMembers || 0, 
           broadcastSent: brd.data.totalSent || 0, 
-          moderation: 0 
+          moderation: 0,
+          users: usr.data.totalUsers || 0,
         });
         setWhatsapp({ 
           status: wa.data.session?.status || "disconnected", 
@@ -42,6 +70,7 @@ const Dashboard = () => {
         });
         setLogs(logsRes.data.logs || []);
       } catch {}
+      checkActiveRules();
       setPageLoading(false);
     };
     load();
@@ -49,25 +78,37 @@ const Dashboard = () => {
 
   useEffect(() => {
     if (!socket) return;
-    socket.on("whatsapp:qr", ({ qr }) => setWhatsapp((s) => ({ ...s, qr })));
+    socket.on("whatsapp:qr", ({ qr }) => {
+      setWhatsapp((s) => ({ ...s, qr }));
+      setLoading((s) => ({ ...s, connect: false, pair: false }));
+    });
     socket.on("whatsapp:status", ({ status }) => {
       setWhatsapp((s) => ({ ...s, status, qr: status === "connected" ? null : s.qr }));
       if (status === "connected") setPairingCode(null);
     });
     socket.on("whatsapp:pairingCode", ({ code }) => setPairingCode(code));
-    socket.on("forwarding:activity", (data) => setForwardActivity((prev) => [{ ...data, _id: activityIdCounter++ }, ...prev].slice(0, 50)));
+    socket.on("forwarding:activity", (data) => {
+      setForwardActivity((prev) => [{ ...data, _id: activityIdCounter++ }, ...prev].slice(0, 50));
+      setForwardingActive(true);
+    });
+    socket.on("forwarding:stopped", () => { setForwardingActive(false); checkActiveRules(); });
+    socket.on("connect", () => fetchStatus());
     return () => {
       socket.off("whatsapp:qr");
       socket.off("whatsapp:status");
       socket.off("whatsapp:pairingCode");
       socket.off("forwarding:activity");
+      socket.off("forwarding:stopped");
+      socket.off("connect", fetchStatus);
     };
   }, [socket]);
 
   useEffect(() => {
+    statusPollRef.current = setInterval(fetchStatus, 5000);
     return () => {
       if (connectPollRef.current) clearInterval(connectPollRef.current);
       if (pairPollRef.current) clearInterval(pairPollRef.current);
+      if (statusPollRef.current) clearInterval(statusPollRef.current);
     };
   }, []);
 
@@ -79,12 +120,12 @@ const Dashboard = () => {
       let attempts = 0;
       const poll = setInterval(async () => {
         attempts++;
-        if (attempts > 15) { clearInterval(poll); setLoading((s) => ({ ...s, connect: false })); return; }
+        if (attempts > 60) { clearInterval(poll); setLoading((s) => ({ ...s, connect: false })); return; }
         try {
           const res = await api.get("/whatsapp/qr");
           if (res.data?.qr) { setWhatsapp((s) => ({ ...s, qr: res.data.qr })); clearInterval(poll); setLoading((s) => ({ ...s, connect: false })); }
         } catch {}
-      }, 2000);
+      }, 1000);
       connectPollRef.current = poll;
     } catch {
       setLoading((s) => ({ ...s, connect: false }));
@@ -120,6 +161,12 @@ const Dashboard = () => {
     }
   };
 
+  const handleStopForwarding = async () => {
+    setStoppingForward(true);
+    try { await api.post("/forwarding/stop"); setForwardingActive(false); } catch {}
+    setStoppingForward(false);
+  };
+
   const handleSyncGroups = async () => {
     setSyncing(true);
     try {
@@ -140,6 +187,7 @@ const Dashboard = () => {
     <div style={styles.container}>
       <style>{`
         @keyframes spin { to { transform: rotate(360deg); } }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.6; } }
         .hover-card:hover { transform: translateY(-3px); box-shadow: 0 4px 15px rgba(0,0,0,0.06); }
       `}</style>
       
@@ -159,6 +207,11 @@ const Dashboard = () => {
           {whatsapp.phone && <span style={styles.phoneBadge}>{whatsapp.phone}</span>}
         </div>
         <div style={styles.actions}>
+          {forwardingActive && (
+            <button onClick={handleStopForwarding} style={stoppingForward ? { ...styles.btnStop, ...styles.btnDisabled } : styles.btnStop} disabled={stoppingForward}>
+              {stoppingForward ? <><span style={{ ...styles.spinner, borderTopColor: "#fff" }} /> Arrêt...</> : <><i className="bi bi-stop-fill" style={{ marginRight: 6 }}></i>Arrêter le transfert</>}
+            </button>
+          )}
           <button onClick={handleSyncGroups} style={syncing ? { ...styles.btnSync, ...styles.btnDisabled } : styles.btnSync} disabled={syncing}>
             {syncing ? <><span style={styles.spinner} /> Sync...</> : <><i className="bi bi-arrow-clockwise" style={{ marginRight: 6 }}></i>Synchroniser</>}
           </button>
@@ -176,7 +229,7 @@ const Dashboard = () => {
       </div>
 
       {whatsapp.qr && !pairingCode && (
-        <div style={styles.qrBox}>
+        <div style={styles.qrBox(isMobile)}>
           <div style={styles.qrInfo}>
             <h3 style={styles.qrTitle}>Lier votre appareil via QR Code</h3>
             <p style={styles.qrText}>
@@ -190,7 +243,7 @@ const Dashboard = () => {
       )}
 
       {pairingCode && (
-        <div style={styles.qrBox}>
+        <div style={styles.qrBox(isMobile)}>
           <div style={styles.qrInfo}>
             <h3 style={styles.qrTitle}>Lier votre appareil via Code d'appariement</h3>
             <p style={styles.qrText}>
@@ -209,7 +262,7 @@ const Dashboard = () => {
       {whatsapp.status === "disconnected" && !whatsapp.qr && !pairingCode && (
         <div style={styles.pairSection}>
           <h4 style={styles.pairTitle}>Pas d'appareil photo fonctionnel ? Appairez avec un code textuel</h4>
-          <div style={styles.pairRow}>
+          <div style={styles.pairRow(isMobile)}>
             <input
               type="tel"
               placeholder="Numéro au format international (ex: 33612345678)"
@@ -227,11 +280,12 @@ const Dashboard = () => {
       <div style={styles.grid}>
         <StatusCard icon="bi bi-people-fill" label="Groupes détectés" value={stats.groups} color="#00a884" />
         <StatusCard icon="bi bi-person-fill" label="Membres totaux" value={stats.members} color="#128c7e" />
+        <StatusCard icon="bi bi-people" label="Utilisateurs du bot" value={stats.users} color="#5f4b8b" />
         <StatusCard icon="bi bi-send-check-fill" label="Diffusions relayées" value={stats.broadcastSent} color="#34b7f1" />
         <StatusCard icon="bi bi-shield-fill-check" label="Statut Sécurité" value="Actif" color="#ffc107" />
       </div>
 
-      <div style={styles.mainGrid}>
+      <div style={styles.mainGrid(isMobile)}>
         <div style={styles.sectionCard}>
           <h3 style={styles.sectionTitle}>
             <i className="bi bi-arrow-left-right" style={{ marginRight: 8, color: "#00a884" }}></i>Activité en temps réel
@@ -248,16 +302,19 @@ const Dashboard = () => {
                 <span style={{ ...styles.activityBadge, backgroundColor: a.masterGroup ? "#fff9db" : "#f0f2f5" }}>
                   <i className={`bi ${a.masterGroup ? "bi-trophy-fill" : "bi-arrow-left-right"}`} style={{ color: a.masterGroup ? "#ffc107" : "#8696a0" }}></i>
                 </span>
-                <div style={styles.activityContent}>
-                  <div style={styles.activityTop}>
-                    <strong style={styles.activityRule}>{a.ruleName}</strong>
-                    <span style={styles.activityTime}>{a.time ? new Date(a.time).toLocaleTimeString("fr-FR") : ""}</span>
+                  <div style={styles.activityContent}>
+                    <div style={styles.activityTop}>
+                      <strong style={styles.activityRule}>{a.ruleName}</strong>
+                      <span style={styles.activityTime}>{a.time ? new Date(a.time).toLocaleTimeString("fr-FR") : ""}</span>
+                    </div>
+                    <span style={styles.activityMsg}>
+                      {a.mediaLabel && <span style={{ marginRight: 6, fontWeight: 600 }}>{a.mediaLabel}</span>}
+                      {a.message ? `"${a.message.length > 50 ? a.message.substring(0, 50) + "..." : a.message}"` : ""}
+                    </span>
+                    <span style={styles.activityMeta}>
+                      Expéditeur : <strong>@{a.sender}</strong> &rarr; Partagé avec <strong>{a.targets ?? 0} groupe{(a.targets ?? 0) > 1 ? "s" : ""}</strong>
+                    </span>
                   </div>
-                  <span style={styles.activityMsg}>"{a.message}"</span>
-                  <span style={styles.activityMeta}>
-                    Expéditeur : <strong>@{a.sender}</strong> &rarr; Partagé avec <strong>{a.targets ?? 0} groupe{(a.targets ?? 0) > 1 ? "s" : ""}</strong>
-                  </span>
-                </div>
               </div>
             ))}
           </div>
@@ -315,10 +372,12 @@ const styles = {
     alignItems: "center", 
     justifyContent: "space-between", 
     boxShadow: "0 1px 3px rgba(11,20,26,0.08)",
-    border: "1px solid #e9edef"
+    border: "1px solid #e9edef",
+    gap: 12,
+    flexWrap: "wrap"
   },
-  waStatus: { display: "flex", alignItems: "center", gap: 10 },
-  dot: { width: 10, height: 10, borderRadius: "50%" },
+  waStatus: { display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" },
+  dot: { width: 10, height: 10, borderRadius: "50%", flexShrink: 0 },
   waText: { fontSize: 14, fontWeight: 600, color: "#111b21" },
   phoneBadge: { 
     fontSize: 12, 
@@ -328,7 +387,7 @@ const styles = {
     borderRadius: 6,
     fontWeight: 600
   },
-  actions: { display: "flex", gap: 8 },
+  actions: { display: "flex", gap: 8, flexWrap: "wrap" },
   btnConnect: { 
     padding: "10px 20px", 
     backgroundColor: "#00a884", 
@@ -339,6 +398,18 @@ const styles = {
     fontWeight: 600, 
     cursor: "pointer",
     transition: "background 0.2s"
+  },
+  btnStop: { 
+    padding: "10px 20px", 
+    backgroundColor: "#ea4335", 
+    color: "#fff", 
+    border: "none", 
+    borderRadius: 8, 
+    fontSize: 13, 
+    fontWeight: 600, 
+    cursor: "pointer",
+    transition: "background 0.2s",
+    animation: "pulse 1.5s infinite"
   },
   btnDisconnect: { 
     padding: "10px 20px", 
@@ -362,7 +433,7 @@ const styles = {
     cursor: "pointer",
     transition: "background 0.2s"
   },
-  qrBox: { 
+  qrBox: (isMobile) => ({ 
     backgroundColor: "#fff", 
     borderRadius: 12, 
     padding: 24, 
@@ -371,8 +442,10 @@ const styles = {
     justifyContent: "space-between",
     boxShadow: "0 1px 3px rgba(11,20,26,0.08)",
     border: "1px solid #e9edef",
-    gap: 40
-  },
+    gap: 24,
+    flexDirection: isMobile ? "column" : "row",
+    textAlign: isMobile ? "center" : "left"
+  }),
   qrInfo: {
     flex: 1,
     display: "flex",
@@ -424,7 +497,7 @@ const styles = {
     color: "#54656f",
     margin: 0
   },
-  pairRow: { display: "flex", gap: 10 },
+  pairRow: (isMobile) => ({ display: "flex", gap: 10, flexDirection: isMobile ? "column" : "row" }),
   phoneInput: { 
     flex: 1, 
     padding: "12px 14px", 
@@ -447,11 +520,11 @@ const styles = {
     whiteSpace: "nowrap" 
   },
   grid: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 16 },
-  mainGrid: {
+  mainGrid: (isMobile) => ({
     display: "grid",
-    gridTemplateColumns: "1.2fr 0.8fr",
+    gridTemplateColumns: isMobile ? "1fr" : "1.2fr 0.8fr",
     gap: 20
-  },
+  }),
   sectionCard: { 
     backgroundColor: "#fff", 
     borderRadius: 12, 

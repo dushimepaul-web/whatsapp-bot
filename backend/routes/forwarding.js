@@ -8,5 +8,6 @@ router.get("/:id", auth, forwardingController.get);
 router.put("/:id", auth, forwardingController.update);
 router.delete("/:id", auth, forwardingController.remove);
 router.patch("/:id/toggle", auth, forwardingController.toggle);
+router.post("/stop", auth, forwardingController.stopForwarding);
 
 module.exports = router;

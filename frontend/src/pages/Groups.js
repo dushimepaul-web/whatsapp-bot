@@ -1,8 +1,10 @@
 import React, { useState, useEffect } from "react";
 import api from "../services/api";
 import { formatDate } from "../utils/helpers";
+import { useMediaQuery } from "../hooks/useMediaQuery";
 
 const Groups = () => {
+  const isMobile = useMediaQuery("(max-width: 768px)");
   const [groups, setGroups] = useState([]);
   const [search, setSearch] = useState("");
   const [selected, setSelected] = useState(null);
@@ -76,8 +78,8 @@ const Groups = () => {
         </div>
       </div>
 
-      <div style={styles.split}>
-        <div style={styles.listPanel}>
+      <div style={styles.split(isMobile)}>
+        <div style={styles.listPanel(isMobile)}>
           <div style={styles.listHeader}>
             <span>Tous les groupes ({total})</span>
           </div>
@@ -119,7 +121,7 @@ const Groups = () => {
           )}
         </div>
 
-        <div style={styles.detailPanel}>
+        <div style={styles.detailPanel(isMobile)}>
           {selected ? (
             <div style={styles.detailContainer}>
               <div style={styles.detailHeader}>
@@ -137,7 +139,7 @@ const Groups = () => {
                 </div>
               )}
 
-              <div style={styles.infoGrid}>
+              <div style={styles.infoGrid(isMobile)}>
                 <div style={styles.infoItem}>
                   <span style={styles.infoVal}>{selected.memberCount}</span>
                   <span style={styles.infoLbl}>Membres</span>
@@ -165,7 +167,7 @@ const Groups = () => {
               <div style={styles.controlSection}>
                 <h4 style={styles.sectionHeading}>Actions & Règles de Modération</h4>
                 
-                <div style={styles.actionRow}>
+                  <div style={styles.actionRow(isMobile)}>
                   <div style={styles.actionInfo}>
                     <span style={styles.actionTitle}>Visibilité dans le Dashboard</span>
                     <span style={styles.actionDesc}>Masquer ce groupe des listes de cibles si nécessaire.</span>
@@ -178,7 +180,7 @@ const Groups = () => {
                   </button>
                 </div>
 
-                <div style={styles.actionRow}>
+                  <div style={styles.actionRow(isMobile)}>
                   <div style={styles.actionInfo}>
                     <span style={styles.actionTitle}>
                       Restriction "Texte uniquement" <span style={styles.betaLabel}>Sécurisé</span>
@@ -263,16 +265,17 @@ const styles = {
     backgroundColor: "#fff",
     boxShadow: "0 1px 2px rgba(0,0,0,0.03)"
   },
-  split: { display: "grid", gridTemplateColumns: "1fr 1.3fr", gap: 20 },
-  listPanel: { 
+  split: (isMobile) => ({ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "1fr 1.3fr", gap: 20 }),
+  listPanel: (isMobile) => ({ 
     backgroundColor: "#fff",
     borderRadius: 12,
     border: "1px solid #e9edef",
     display: "flex", 
     flexDirection: "column", 
-    height: "calc(100vh - 200px)",
+    height: isMobile ? "auto" : "calc(100vh - 200px)",
+    maxHeight: isMobile ? "300px" : "none",
     overflow: "hidden" 
-  },
+  }),
   listHeader: {
     padding: "16px 20px",
     borderBottom: "1px solid #e9edef",
@@ -318,14 +321,15 @@ const styles = {
     fontWeight: 600,
     marginLeft: "auto"
   },
-  detailPanel: { 
+  detailPanel: (isMobile) => ({ 
     backgroundColor: "#fff", 
     borderRadius: 12, 
     border: "1px solid #e9edef",
-    height: "calc(100vh - 200px)", 
+    height: isMobile ? "auto" : "calc(100vh - 200px)", 
+    maxHeight: isMobile ? "none" : "none",
     overflowY: "auto",
     boxShadow: "0 1px 3px rgba(11,20,26,0.05)"
-  },
+  }),
   detailContainer: {
     padding: 24,
     display: "flex",
@@ -373,12 +377,12 @@ const styles = {
     marginBottom: 4
   },
   detailDesc: { fontSize: 13, color: "#54656f", margin: 0, fontStyle: "italic", lineHeight: 1.4 },
-  infoGrid: {
+  infoGrid: (isMobile) => ({
     display: "grid",
-    gridTemplateColumns: "repeat(3, 1fr)",
+    gridTemplateColumns: isMobile ? "repeat(3, 1fr)" : "repeat(3, 1fr)",
     gap: 12,
     textAlign: "center"
-  },
+  }),
   infoItem: {
     backgroundColor: "#f8f9fa",
     border: "1px solid #e9edef",
@@ -429,12 +433,13 @@ const styles = {
     textTransform: "uppercase",
     letterSpacing: "0.2px"
   },
-  actionRow: {
+  actionRow: (isMobile) => ({
     display: "flex",
     justifyContent: "space-between",
-    alignItems: "center",
-    gap: 16
-  },
+    alignItems: isMobile ? "stretch" : "center",
+    gap: 12,
+    flexDirection: isMobile ? "column" : "row"
+  }),
   actionInfo: {
     flex: 1,
     display: "flex",

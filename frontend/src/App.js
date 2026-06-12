@@ -1,6 +1,7 @@
 import React from "react";
 import { Routes, Route, Navigate } from "react-router-dom";
 import { useAuth } from "./hooks/useAuth";
+import { SidebarProvider } from "./context/SidebarContext";
 import AuthLayout from "./layouts/AuthLayout";
 import MainLayout from "./layouts/MainLayout";
 import Login from "./pages/Login";
@@ -12,6 +13,7 @@ import BroadcastCenter from "./pages/BroadcastCenter";
 import Forwarding from "./pages/Forwarding";
 import Logs from "./pages/Logs";
 import Settings from "./pages/Settings";
+import Console from "./pages/Console";
 
 class ErrorBoundary extends React.Component {
   constructor(props) {
@@ -40,6 +42,7 @@ const PrivateRoute = ({ children }) => {
 function App() {
   return (
     <ErrorBoundary>
+      <SidebarProvider>
       <div style={styles.app}>
         <Routes>
           <Route element={<AuthLayout />}>
@@ -53,10 +56,12 @@ function App() {
             <Route path="/broadcast" element={<BroadcastCenter />} />
             <Route path="/forwarding" element={<Forwarding />} />
             <Route path="/logs" element={<Logs />} />
+            <Route path="/console" element={<Console />} />
             <Route path="/settings" element={<Settings />} />
           </Route>
         </Routes>
       </div>
+      </SidebarProvider>
     </ErrorBoundary>
   );
 }

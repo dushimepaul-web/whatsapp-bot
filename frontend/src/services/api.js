@@ -1,8 +1,9 @@
 import axios from "axios";
 
 const api = axios.create({
-  baseURL: process.env.REACT_APP_API_URL || "http://localhost:3001/api",
+  baseURL: process.env.REACT_APP_API_URL || "/api",
   headers: { "Content-Type": "application/json" },
+  withCredentials: true,
 });
 
 api.interceptors.response.use(
@@ -12,17 +13,14 @@ api.interceptors.response.use(
     if (err.response?.status === 401 && err.response?.data?.code === "TOKEN_EXPIRED" && !original._retry) {
       original._retry = true;
       try {
-        const refreshToken = localStorage.getItem("refreshToken");
-        if (!refreshToken) throw new Error("No refresh token");
-        const { data } = await axios.post(`${api.defaults.baseURL}/auth/refresh`, { refreshToken });
+        const { data } = await axios.post(`${api.defaults.baseURL}/auth/refresh`, {}, { withCredentials: true });
         localStorage.setItem("token", data.token);
-        localStorage.setItem("refreshToken", data.refreshToken);
         api.defaults.headers.common["Authorization"] = `Bearer ${data.token}`;
         original.headers["Authorization"] = `Bearer ${data.token}`;
         return api(original);
       } catch {
         localStorage.removeItem("token");
-        localStorage.removeItem("refreshToken");
+        delete api.defaults.headers.common["Authorization"];
         window.location.href = "/login";
       }
     }

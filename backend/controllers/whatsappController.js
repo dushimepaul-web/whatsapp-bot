@@ -4,8 +4,9 @@ const logger = require("../utils/logger");
 
 exports.getStatus = async (req, res) => {
   try {
-    const status = await whatsappService.getStatus();
-    const session = await whatsappService.getSession();
+    const userId = req.user._id;
+    const status = await whatsappService.getStatus(userId);
+    const session = await whatsappService._getSessionDoc(userId);
     res.json({ ...status, session });
   } catch (err) {
     logger.error({ err: err.message || err, stack: err.stack }, "Erreur statut");
@@ -17,11 +18,11 @@ exports.connect = async (req, res) => {
   try {
     const userId = req.user._id;
 
-    if (whatsappService.getSocket()) {
-      await whatsappService.disconnect();
+    if (whatsappService.getSocket(userId)) {
+      await whatsappService.disconnect(userId);
     }
 
-    let session = await whatsappService.getSession();
+    let session = await whatsappService._getSessionDoc(userId);
     if (!session) {
       session = await WhatsappSession.create({ userId });
     }
@@ -30,8 +31,9 @@ exports.connect = async (req, res) => {
     session.qrCode = null;
     await session.save();
 
-    whatsappService.connect(userId, true).catch((err) => {
-      logger.error({ err: err.message || err }, "Erreur connexion WhatsApp");
+    const fresh = req.query.fresh !== "false";
+    whatsappService.connect(userId, fresh).catch((err) => {
+      logger.error({ err: err.message || err }, `Erreur connexion WhatsApp user=${userId}`);
     });
 
     res.json({ message: "Connexion initiée", session });
@@ -43,7 +45,8 @@ exports.connect = async (req, res) => {
 
 exports.disconnect = async (req, res) => {
   try {
-    await whatsappService.disconnect();
+    const userId = req.user._id;
+    await whatsappService.disconnect(userId);
     res.json({ message: "WhatsApp déconnecté" });
   } catch (err) {
     logger.error("Erreur disconnect:", err);
@@ -53,7 +56,8 @@ exports.disconnect = async (req, res) => {
 
 exports.getQr = async (req, res) => {
   try {
-    const session = await whatsappService.getSession();
+    const userId = req.user._id;
+    const session = await whatsappService._getSessionDoc(userId);
     res.json({ qr: session?.qrCode || null });
   } catch (err) {
     logger.error("Erreur getQr:", err);
@@ -70,11 +74,11 @@ exports.pair = async (req, res) => {
     const cleaned = phone.replace(/[^0-9]/g, "");
     if (cleaned.length < 7) return res.status(400).json({ error: "Numéro invalide" });
 
-    if (whatsappService.getSocket()) {
-      await whatsappService.disconnect();
+    if (whatsappService.getSocket(userId)) {
+      await whatsappService.disconnect(userId);
     }
 
-    let session = await whatsappService.getSession();
+    let session = await whatsappService._getSessionDoc(userId);
     if (!session) {
       session = await WhatsappSession.create({ userId });
     }
@@ -85,7 +89,7 @@ exports.pair = async (req, res) => {
     await session.save();
 
     whatsappService.connect(userId, true, cleaned).catch((err) => {
-      logger.error({ err: err.message || err }, "Erreur appariement WhatsApp");
+      logger.error({ err: err.message || err }, `Erreur appariement WhatsApp user=${userId}`);
     });
 
     res.json({ message: "Code d'appariement demandé", session });

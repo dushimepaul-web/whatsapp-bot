@@ -14,4 +14,7 @@ const forwardingRuleSchema = new mongoose.Schema({
   isActive: { type: Boolean, default: true },
 }, { timestamps: true });
 
+forwardingRuleSchema.index({ userId: 1 });
+forwardingRuleSchema.index({ sourceGroupId: 1, userId: 1, isActive: 1 });
+
 module.exports = mongoose.model("ForwardingRule", forwardingRuleSchema);

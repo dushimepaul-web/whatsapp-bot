@@ -20,7 +20,7 @@ export const SocketProvider = ({ children }) => {
     }
 
     const token = localStorage.getItem("token");
-    const s = io("http://localhost:3001", {
+    const s = io("/", {
       auth: { token },
       transports: ["websocket", "polling"],
     });

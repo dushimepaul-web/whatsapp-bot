@@ -25,7 +25,7 @@ class BroadcastService {
     broadcast.failedCount = 0;
     await broadcast.save();
 
-    const sock = whatsappService.getSocket();
+    const sock = whatsappService.getSocket(userId);
     if (!sock) throw new Error("WhatsApp non connecté");
 
     const settings = await Setting.findOne({ userId });
@@ -35,18 +35,23 @@ class BroadcastService {
     let targets = [];
 
     if (broadcast.toAllGroups) {
-      const groups = await Group.find({});
+      const groups = await Group.find({ userId });
       targets = groups.map((g) => ({ type: "group", id: g.groupId }));
     } else if (broadcast.targetGroups?.length) {
       targets = broadcast.targetGroups.map((id) => ({ type: "group", id }));
     }
 
     if (broadcast.toAllMembers) {
-      const members = await Member.find({});
+      const members = await Member.find({ userId });
       const memberTargets = members.map((m) => ({ type: "member", id: m.jid }));
       targets = [...targets, ...memberTargets];
     } else if (broadcast.targetMembers?.length) {
       targets = [...targets, ...broadcast.targetMembers.map((id) => ({ type: "member", id }))];
+    }
+
+    if (targets.length > dailyLimit) {
+      logger.warn(`Broadcast ${broadcastId}: ${targets.length} cibles dépasse la limite quotidienne ${dailyLimit}, tronqué`);
+      targets = targets.slice(0, dailyLimit);
     }
 
     broadcast.totalCount = targets.length;
@@ -56,16 +61,10 @@ class BroadcastService {
     let failedCount = 0;
 
     for (let i = 0; i < targets.length; i++) {
-      if (i >= dailyLimit) {
-        logger.warn("Limite quotidienne atteinte");
-        break;
-      }
-
       const { id } = targets[i];
 
       try {
-        // Anti-ban: Simulation d'écriture
-        await sock.sendPresenceUpdate("composing", id);
+        try { await sock.sendPresenceUpdate("composing", id); } catch {}
         await sleep(1000 + Math.random() * 1000);
 
         if (broadcast.type === "text") {
@@ -86,8 +85,7 @@ class BroadcastService {
           });
         }
         sentCount++;
-        
-        // Anti-ban: Délai variable avec jitter aléatoire de 1 à 3 secondes
+
         const jitter = 1000 + Math.random() * 2000;
         await sleep(delayMs + jitter);
       } catch (err) {

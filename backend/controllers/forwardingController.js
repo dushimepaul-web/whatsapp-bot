@@ -1,4 +1,5 @@
 const ForwardingRule = require("../models/ForwardingRule");
+const broadcastManager = require("../whatsapp/broadcastManager");
 const logger = require("../utils/logger");
 
 const ALLOWED_FIELDS = [
@@ -64,6 +65,16 @@ exports.remove = async (req, res) => {
     if (!rule) return res.status(404).json({ error: "Règle introuvable" });
     res.json({ message: "Règle supprimée" });
   } catch (err) {
+    res.status(500).json({ error: "Erreur serveur" });
+  }
+};
+
+exports.stopForwarding = async (req, res) => {
+  try {
+    broadcastManager.stop(req.user._id);
+    res.json({ message: "Forwarding arrêté" });
+  } catch (err) {
+    logger.error("Erreur arrêt forwarding:", err);
     res.status(500).json({ error: "Erreur serveur" });
   }
 };
