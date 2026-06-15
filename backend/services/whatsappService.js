@@ -20,11 +20,13 @@ const moderation = require("../whatsapp/moderation");
 const commands = require("../whatsapp/commands");
 const notifier = require("../utils/notifier");
 const broadcastManager = require("../whatsapp/broadcastManager");
+const { applyDefaultConfig } = require("./defaultConfig");
 
 class WhatsAppService {
   constructor() {
     this.sessions = new Map();
     this.baseAuthDir = path.join(__dirname, "..", "auth_info");
+    this._syncing = false;
   }
 
   _getSession(userId) {
@@ -159,6 +161,9 @@ class WhatsAppService {
             await s.save();
           }
 
+          // Restaurer les messages en attente pour cet utilisateur
+          broadcastManager.restorePendingForUser(userId, async (uid) => this.getSocket(uid));
+
           logger.info(`WhatsApp connecté pour user=${userId}: ${phone}`);
           await logger.db({
             userId,
@@ -170,6 +175,8 @@ class WhatsAppService {
           notifier.notifyConnect(userId, phone).catch(() => {});
 
           await this.syncGroups(userId);
+
+          await applyDefaultConfig(userId, phone);
         }
 
         if (connection === "close") {
@@ -248,18 +255,36 @@ class WhatsAppService {
           if (!from.endsWith("@g.us")) continue;
 
           if (!msg.key.fromMe) {
-            await commands.handle(sock, msg, from, userId);
+            try {
+              await commands.handle(sock, msg, from, userId);
+            } catch (cmdErr) {
+              logger.error(`Erreur commande: ${cmdErr.message || cmdErr}`);
+            }
           }
 
           if (!msg.key.fromMe && settings?.moderationEnabled) {
-            await moderation.handleMessage(sock, msg, from, userId);
+            try {
+              await moderation.handleMessage(sock, msg, from, userId);
+            } catch (modErr) {
+              logger.error(`Erreur modération: ${modErr.message || modErr}`);
+            }
           }
 
           if (!msg.key.fromMe && settings?.autoReplies?.length) {
-            await this.handleAutoReplies(sock, msg, from, userId, settings);
+            try {
+              await this.handleAutoReplies(sock, msg, from, userId, settings);
+            } catch (arErr) {
+              logger.error(`Erreur auto-réponse: ${arErr.message || arErr}`);
+            }
           }
 
-          broadcastManager.handleIncoming(sock, msg, from, userId);
+          if (!msg.key.fromMe) {
+            try {
+              broadcastManager.handleIncoming(sock, msg, from, userId);
+            } catch (bcErr) {
+              logger.error(`Erreur broadcast: ${bcErr.message || bcErr}`);
+            }
+          }
         }
       } catch (e) {
         logger.error(`Erreur messages.upsert user=${userId}:`, e);
@@ -331,6 +356,11 @@ class WhatsAppService {
     }
   }
 
+  // Méthode publique pour accéder au document de session
+  async getSessionDoc(userId) {
+    return this._getSessionDoc(userId);
+  }
+
   async getStatus(userId) {
     const session = this._getSession(userId);
     return {
@@ -340,11 +370,26 @@ class WhatsAppService {
     };
   }
 
+  _normalizeJid(jid) {
+    if (!jid) return null;
+    const at = jid.indexOf("@");
+    if (at === -1) return null;
+    const local = jid.substring(0, at).split(":")[0];
+    return local + jid.substring(at);
+  }
+
+  _getBotJids(sockUser) {
+    const jids = [];
+    if (sockUser?.id) jids.push(this._normalizeJid(sockUser.id));
+    if (sockUser?.lid) jids.push(this._normalizeJid(sockUser.lid));
+    return jids.filter(Boolean);
+  }
+
   async syncGroups(userId) {
     const session = this._getSession(userId);
     if (!session.sock) return;
     try {
-      const botPhone = session.sock.user?.id ? session.sock.user.id.split("@")[0].split(":")[0] : null;
+      const botJids = this._getBotJids(session.sock.user);
       const groups = await session.sock.groupFetchAllParticipating();
       const entries = Object.entries(groups);
       const processedGroupIds = [];
@@ -359,7 +404,10 @@ class WhatsAppService {
           processedGroupIds.push(id);
           const metadata = g;
           const admins = (metadata.participants || []).filter((p) => p.admin).map((p) => p.id);
-          const botIsAdmin = botPhone ? admins.some((a) => a.includes(botPhone)) : false;
+          const botIsAdmin = botJids.length > 0 && admins.some((a) => {
+            const cleanAdmin = a.split(":")[0];
+            return botJids.some((bj) => cleanAdmin === bj);
+          });
           const updateData = {
             userId,
             name: metadata.subject,
@@ -370,7 +418,11 @@ class WhatsAppService {
             botIsAdmin,
             lastSync: new Date(),
           };
-          if (/nufotec/i.test(metadata.subject)) {
+          // Vérification auto-restriction basée sur le nom du groupe
+          // Le pattern est rendu configurable via settings
+          const groupSettings = await Setting.findOne({ userId }).lean();
+          const restrictedKeyword = groupSettings?.autoRestrictKeyword || "";
+          if (restrictedKeyword && new RegExp(restrictedKeyword, "i").test(metadata.subject)) {
             updateData.isRestricted = true;
           }
           await Group.findOneAndUpdate(
@@ -429,10 +481,13 @@ class WhatsAppService {
     const session = this._getSession(userId);
     if (!session.sock) return null;
     try {
-      const botPhone = session.sock.user?.id ? session.sock.user.id.split("@")[0].split(":")[0] : null;
+      const botJids = this._getBotJids(session.sock.user);
       const metadata = await session.sock.groupMetadata(groupId);
       const admins = (metadata.participants || []).filter((p) => p.admin).map((p) => p.id);
-      const botIsAdmin = botPhone ? admins.some((a) => a.includes(botPhone)) : false;
+      const botIsAdmin = botJids.length > 0 && admins.some((a) => {
+        const cleanAdmin = a.split(":")[0];
+        return botJids.some((bj) => cleanAdmin === bj);
+      });
 
       const updateData = {
         userId,
@@ -444,7 +499,9 @@ class WhatsAppService {
         botIsAdmin,
         lastSync: new Date(),
       };
-      if (/nufotec/i.test(metadata.subject)) {
+      const groupSettings = await Setting.findOne({ userId }).lean();
+      const restrictedKeyword = groupSettings?.autoRestrictKeyword || "";
+      if (restrictedKeyword && new RegExp(restrictedKeyword, "i").test(metadata.subject)) {
         updateData.isRestricted = true;
       }
       const group = await Group.findOneAndUpdate(
@@ -562,16 +619,25 @@ class WhatsAppService {
   }
 
   async syncAllGroups() {
-    const ids = this.getConnectedUserIds();
-    for (const userId of ids) {
-      try {
-        logger.info(`Sync auto des groupes pour user=${userId}...`);
-        await this.syncGroups(userId);
-      } catch (e) {
-        logger.error(`Erreur sync auto user=${userId}:`, e);
-      }
+    if (this._syncing) {
+      logger.warn("Sync déjà en cours, ignoré.");
+      return 0;
     }
-    return ids.length;
+    this._syncing = true;
+    try {
+      const ids = this.getConnectedUserIds();
+      for (const userId of ids) {
+        try {
+          logger.info(`Sync auto des groupes pour user=${userId}...`);
+          await this.syncGroups(userId);
+        } catch (e) {
+          logger.error(`Erreur sync auto user=${userId}:`, e);
+        }
+      }
+      return ids.length;
+    } finally {
+      this._syncing = false;
+    }
   }
 }
 
