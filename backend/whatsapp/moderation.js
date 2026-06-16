@@ -25,6 +25,8 @@ class Moderation {
     const rawContent = msg.message;
     if (!rawContent) return;
 
+    if (msg.messageStubType !== undefined && msg.messageStubType !== null) return;
+
     const group = await Group.findOne({ groupId: from, userId }).lean();
     if (!group?.isRestricted) return;
 
@@ -44,19 +46,23 @@ class Moderation {
     if (isAdmin) return;
 
     const msgContent = getRealMessage(rawContent);
+    if (!msgContent || msgContent.protocolMessage || msgContent.senderKeyDistributionMessage) return;
     const isText = msgContent?.conversation || msgContent?.extendedTextMessage;
+    const isMedia = !!(msgContent?.imageMessage || msgContent?.videoMessage ||
+                    msgContent?.audioMessage || msgContent?.documentMessage ||
+                    msgContent?.stickerMessage || msgContent?.ptvMessage);
     const text = getRawText(msgContent);
     const hasLink = /https?:\/\/[^\s]+|www\.[^\s]+/i.test(text);
 
     let isDisallowed = false;
     let reason = "";
 
-    if (!isText) {
+    if (isMedia) {
       isDisallowed = true;
-      reason = "seul le texte est autorisé dans ce groupe";
-    } else if (hasLink) {
+      reason = "media";
+    } else if (isText && hasLink) {
       isDisallowed = true;
-      reason = "les liens ne sont pas autorisés dans ce groupe";
+      reason = "link";
     }
 
     if (isDisallowed) {
@@ -66,6 +72,11 @@ class Moderation {
         } catch (delErr) {
           logger.warn(`Suppression impossible dans ${from}: ${delErr.message}. Le bot n'est peut-être pas admin.`);
         }
+
+        const warning = reason === "media"
+          ? `@${senderPhone} Désolé, les médias (photo, vidéo, audio, document, sticker, etc.) ne sont pas autorisés dans ce groupe. Seul le texte simple est permis pour les membres.`
+          : `@${senderPhone} Désolé, les liens ne sont pas autorisés dans ce groupe.`;
+        await sock.sendMessage(from, { text: warning, mentions: [rawParticipant] });
 
         logger.info(`Message modéré (${reason}) de ${rawParticipant} dans ${from}`);
         await logger.db({

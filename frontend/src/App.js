@@ -1,19 +1,20 @@
-import React from "react";
+import React, { Suspense, lazy } from "react";
 import { Routes, Route, Navigate } from "react-router-dom";
 import { useAuth } from "./hooks/useAuth";
 import { SidebarProvider } from "./context/SidebarContext";
 import AuthLayout from "./layouts/AuthLayout";
 import MainLayout from "./layouts/MainLayout";
-import Login from "./pages/Login";
-import Register from "./pages/Register";
-import Dashboard from "./pages/Dashboard";
-import Groups from "./pages/Groups";
-import Members from "./pages/Members";
-import BroadcastCenter from "./pages/BroadcastCenter";
-import Forwarding from "./pages/Forwarding";
-import Logs from "./pages/Logs";
-import Settings from "./pages/Settings";
-import Console from "./pages/Console";
+
+const Login = lazy(() => import("./pages/Login"));
+const Register = lazy(() => import("./pages/Register"));
+const Dashboard = lazy(() => import("./pages/Dashboard"));
+const Groups = lazy(() => import("./pages/Groups"));
+const Members = lazy(() => import("./pages/Members"));
+const BroadcastCenter = lazy(() => import("./pages/BroadcastCenter"));
+const Forwarding = lazy(() => import("./pages/Forwarding"));
+const Logs = lazy(() => import("./pages/Logs"));
+const Settings = lazy(() => import("./pages/Settings"));
+const Console = lazy(() => import("./pages/Console"));
 
 class ErrorBoundary extends React.Component {
   constructor(props) {
@@ -25,7 +26,16 @@ class ErrorBoundary extends React.Component {
   }
   render() {
     if (this.state.hasError) {
-      return <div style={styles.loading}>Une erreur est survenue. Rafraîchissez la page.</div>;
+      return <div style={styles.loading}>
+        <div style={{ textAlign: "center" }}>
+          <div style={{ fontSize: 48, marginBottom: 16 }}>⚠️</div>
+          <div>Une erreur est survenue. Rafraîchissez la page.</div>
+          <button onClick={() => { this.setState({ hasError: false }); window.location.href = "/"; }}
+            style={{ marginTop: 16, padding: "10px 24px", background: "#075e54", color: "#fff", border: "none", borderRadius: 8, fontSize: 14, cursor: "pointer" }}>
+            Retour à l'accueil
+          </button>
+        </div>
+      </div>;
     }
     return this.props.children;
   }
@@ -44,6 +54,7 @@ function App() {
     <ErrorBoundary>
       <SidebarProvider>
       <div style={styles.app}>
+        <Suspense fallback={<div style={styles.loading}>Chargement...</div>}>
         <Routes>
           <Route element={<AuthLayout />}>
             <Route path="/login" element={<Login />} />
@@ -60,6 +71,7 @@ function App() {
             <Route path="/settings" element={<Settings />} />
           </Route>
         </Routes>
+        </Suspense>
       </div>
       </SidebarProvider>
     </ErrorBoundary>

@@ -1,6 +1,7 @@
 const { downloadMediaMessage } = require("@whiskeysockets/baileys");
 const ForwardingRule = require("../models/ForwardingRule");
 const ForwardedMessage = require("../models/ForwardedMessage");
+const PendingForward = require("../models/PendingForward");
 const Member = require("../models/Member");
 const Group = require("../models/Group");
 const Setting = require("../models/Setting");
@@ -15,11 +16,14 @@ const MEDIA_CACHE_DIR = path.join(__dirname, "..", "media_cache");
 
 const cloneMsg = (msg) => {
   if (!msg) return msg;
+  const seen = new WeakSet();
   const deepClone = (obj) => {
     if (Buffer.isBuffer(obj)) return Buffer.from(obj);
     if (obj instanceof Uint8Array) return Buffer.from(obj);
     if (obj === null || obj === undefined) return obj;
     if (typeof obj !== 'object') return obj;
+    if (seen.has(obj)) return undefined;
+    seen.add(obj);
     if (Array.isArray(obj)) return obj.map(deepClone);
     const copy = {};
     for (const [k, v] of Object.entries(obj)) {
@@ -53,12 +57,29 @@ const DOWNLOAD_TIMEOUT_MS = 5 * 60 * 1000;
 const BURST_DURATION_MS = 2 * 60 * 60 * 1000;
 const COOLDOWN_DURATION_MS = 2 * 60 * 60 * 1000;
 const MAX_QUEUE_SIZE = 5000;
+const MAX_RETRIES = 30;
+const SOCKET_RETRIES_BEFORE_BACKOFF = 10;
+
+// Anti-ban constants
+const MIN_DELAY_BASE_MS = 3000;
+const MAX_DELAY_BASE_MS = 8000;
+const JITTER_FACTOR = 0.4;
+const WARM_UP_MESSAGES = 50;
+const WARM_UP_DELAY_MULTIPLIER = 2.5;
+const RANDOM_PAUSE_INTERVAL_MIN = 40;
+const RANDOM_PAUSE_INTERVAL_MAX = 80;
+const RANDOM_PAUSE_MIN_MS = 30000;
+const RANDOM_PAUSE_MAX_MS = 120000;
+const DEFAULT_MSG_PER_MIN = 25;
+const TARGET_THROTTLE_MS = 60000;
 
 class BroadcastManager {
   constructor() {
     this.messageQueue = [];
     this.isProcessing = false;
-    this.stopRequested = false;
+    this.stopRequested = new Set();
+    this.forwardingPaused = new Set();
+    this.restoring = false;
     this.messageCount = 0;
     this.messageWindow = [];
     this.batchBuffer = {};
@@ -68,6 +89,14 @@ class BroadcastManager {
     this.adaptiveDelay = 1;
     this.errorWindow = [];
     this.lastErrorTime = 0;
+    this.consecutiveSocketErrors = new Map();
+    this.processedIds = new Map();
+    this.sockProvider = null;
+    this.dailyCount = new Map();
+    this.lastDailyReset = Date.now();
+    this.warmUpCounts = new Map();
+    this.targetThrottle = new Map();
+    this.messageSincePause = 0;
     this.ensureMediaCacheDir();
   }
 
@@ -136,22 +165,39 @@ class BroadcastManager {
     }
   }
 
-  stop(userId) {
-    this.stopRequested = true;
-    const before = this.messageQueue.length;
-    this.messageQueue = this.messageQueue.filter(
-      item => item.rule?.userId?.toString() !== userId?.toString()
-    );
-    const removed = before - this.messageQueue.length;
+  setSockProvider(provider) {
+    this.sockProvider = provider;
+  }
+
+  async stop(userId) {
+    const uid = userId?.toString();
+    this.stopRequested.add(uid);
+    this.forwardingPaused.add(uid);
+
     for (const ruleId of Object.keys(this.batchBuffer)) {
       const batch = this.batchBuffer[ruleId];
-      if (batch.rule?.userId?.toString() === userId?.toString()) {
-        if (batch.timer) clearTimeout(batch.timer);
-        if (batch.forceTimer) clearTimeout(batch.forceTimer);
-        delete this.batchBuffer[ruleId];
-      }
+      if (batch.rule?.userId?.toString() === uid) {
+          if (batch.timer) clearTimeout(batch.timer);
+          if (batch.forceTimer) clearTimeout(batch.forceTimer);
+          for (const entry of batch.entries) {
+            for (const targetId of entry.targets) {
+              const pendingInfo = entry.pendingEntries?.find(p => p.targetId === targetId);
+              await this.queueMessage(batch.sock, targetId, entry.msg, batch.rule, pendingInfo?.pendingId || null);
+            }
+          }
+          delete this.batchBuffer[ruleId];
+        }
     }
-    logger.info(`Arrêt du forwarding pour user=${userId}, ${removed} messages retirés`);
+
+    const before = this.messageQueue.length;
+    this.messageQueue = this.messageQueue.filter(
+      item => item.rule?.userId?.toString() !== uid
+    );
+    const removed = before - this.messageQueue.length;
+
+    // Supprimer tous les messages en attente en BDD pour cet utilisateur
+    const pendingRemoved = await PendingForward.deleteMany({ userId: uid });
+    logger.info(`Arrêt définitif du forwarding pour user=${uid}, ${removed} messages retirés de la file mémoire, ${pendingRemoved.deletedCount} supprimés de la BDD`);
     if (emitToUserFn && userId) {
       emitToUserFn(userId, "forwarding:stopped", { stopped: true, messages: removed });
     } else if (io) {
@@ -159,29 +205,77 @@ class BroadcastManager {
     }
   }
 
+  async resume(userId) {
+    const uid = userId?.toString();
+    this.forwardingPaused.delete(uid);
+    logger.info(`Forwarding repris pour user=${uid}`);
+    if (emitToUserFn && userId) {
+      emitToUserFn(userId, "forwarding:resumed", { resumed: true });
+    } else if (io) {
+      io.emit("forwarding:resumed", { resumed: true });
+    }
+  }
+
+  isPaused(userId) {
+    return this.forwardingPaused.has(userId?.toString());
+  }
+
   async handleIncoming(sock, msg, from, userId) {
     if (!from || !from.endsWith("@g.us")) {
       return;
     }
 
-    // Détection de suppression de message (protocol REVOKE)
+    if (msg.message?.senderKeyDistributionMessage) return;
+
     const proto = msg.message?.protocolMessage;
-    if (proto?.type === 0 && proto.key) {
-      await this.handleMessageDeletion(sock, proto.key, userId);
+    if (proto) {
+      if (proto.type === 0 && proto.key) {
+        await this.handleMessageDeletion(sock, proto.key, userId);
+      }
       return;
     }
 
+    const msgId = msg.key?.id;
+    if (msgId) {
+      if (this.processedIds.has(msgId)) {
+        logger.debug(`Message ${msgId} déjà traité, ignoré.`);
+        return;
+      }
+      this.processedIds.set(msgId, Date.now());
+      if (this.processedIds.size > 1000) {
+        const cutoff = Date.now() - 60000;
+        for (const [id, ts] of this.processedIds) {
+          if (ts < cutoff) this.processedIds.delete(id);
+        }
+      }
+    }
+
     try {
-      const setting = await Setting.findOne({ userId });
-      const rules = await ForwardingRule.find({ sourceGroupId: from, isActive: true, userId });
-      logger.info(`handleIncoming: ${rules.length} règle(s) trouvée(s) pour ${from}`);
+      const uid = userId?.toString();
+      if (uid && (this.stopRequested.has(uid) || this.forwardingPaused.has(uid))) {
+        logger.debug(`Forwarding arrêté pour user=${uid}, message ignoré`);
+        return;
+      }
+
+      const setting = await Setting.findOne({ userId }).maxTimeMS(5000);
+      const rules = await ForwardingRule.find({ sourceGroupId: from, isActive: true, userId }).maxTimeMS(5000);
+      logger.debug(`handleIncoming: ${rules.length} règle(s) trouvée(s) pour ${from}`);
 
       if (!rules.length && setting?.masterGroupKeyword) {
         const sourceGroup = await Group.findOne({ groupId: from, userId });
         if (sourceGroup && sourceGroup.name && new RegExp(escapeRegex(setting.masterGroupKeyword), "i").test(sourceGroup.name)) {
           const fakeRule = { _id: "auto", name: `Auto: ${sourceGroup.name}`, masterGroup: true, forwardToAllGroups: true, forwardToMembers: false, onlyAdmins: false, includeMedia: true, isActive: true, userId };
           rules.push(fakeRule);
-          logger.info(`Auto-règle master créée via mot-clé "${setting.masterGroupKeyword}" pour ${sourceGroup.name}`);
+          logger.debug(`Auto-règle master créée via mot-clé "${setting.masterGroupKeyword}" pour ${sourceGroup.name}`);
+        }
+      }
+
+      if (!rules.length && setting?.inboxKeyword) {
+        const sourceGroup = await Group.findOne({ groupId: from, userId });
+        if (sourceGroup && sourceGroup.name && new RegExp(escapeRegex(setting.inboxKeyword), "i").test(sourceGroup.name)) {
+          const fakeRule = { _id: "auto", name: `Auto inbox: ${sourceGroup.name}`, masterGroup: false, forwardToAllGroups: true, forwardToMembers: true, onlyAdmins: false, includeMedia: true, isActive: true, userId, targetGroupPattern: setting.forwardingKeyword || "NUFOTEC" };
+          rules.push(fakeRule);
+          logger.debug(`Auto-règle inbox créée via mot-clé "${setting.inboxKeyword}" pour ${sourceGroup.name} → membres des groupes "${setting.forwardingKeyword}"`);
         }
       }
 
@@ -202,9 +296,8 @@ class BroadcastManager {
         senderJid = sock.user.id;
       }
 
-      // Si c'est un message envoyé par le bot/user, c'est forcément un admin
       const isAdmin = msg.key.fromMe ? true : await this.checkIsAdmin(from, senderJid, userId);
-      logger.info(`handleIncoming: sender=${senderJid} admin=${isAdmin} fromMe=${msg.key.fromMe}`);
+      logger.debug(`handleIncoming: sender=${senderJid} admin=${isAdmin} fromMe=${msg.key.fromMe}`);
 
       for (const rule of rules) {
         const requireAdmin = rule.onlyAdmins;
@@ -230,20 +323,21 @@ class BroadcastManager {
           targets = rule.targetGroupIds.filter((id) => id !== from);
         }
 
-        this.emitActivity(rule, msg, senderJid, targets.length);
-
         if (!targets.length) {
           logger.debug(`Règle "${rule.name}": aucun groupe cible`);
           continue;
         }
 
-        logger.info(`Forward: ${targets.length} cibles pour la règle "${rule.name}"`);
+        this.emitActivity(rule, msg, senderJid, targets.length);
+
+          logger.debug(`Forward: ${targets.length} cibles pour la règle "${rule.name}"`);
 
           if (rule.forwardToMembers) {
             const cloned = cloneMsg(msg);
             const senderPhone = senderJid.split("@")[0].split(":")[0];
             const seen = new Set();
             let uniqueCount = 0;
+            const qPromises = [];
             for (const groupId of targets) {
               let skip = 0;
               const batchSize = 100;
@@ -256,14 +350,15 @@ class BroadcastManager {
                   if (memberPhone === senderPhone || seen.has(memberPhone)) continue;
                   seen.add(memberPhone);
                   uniqueCount++;
-                  this.queueMessage(sock, member.jid, cloned, rule);
+                  qPromises.push(this.queueMessage(sock, member.jid, cloned, rule));
                 }
                 skip += batchSize;
               }
             }
-            logger.info(`Inbox: ${uniqueCount} membres uniques en file d'attente (burst 2h/2h)`);
+            await Promise.all(qPromises);
+            logger.debug(`Inbox: ${uniqueCount} membres uniques en file d'attente (burst 2h/2h)`);
         } else {
-          this.addToBatch(sock, rule, msg, targets);
+          await this.addToBatch(sock, rule, msg, targets);
         }
       }
     } catch (err) {
@@ -286,44 +381,113 @@ class BroadcastManager {
     }
   }
 
-  canSend() {
-    const now = Date.now();
-    this.messageWindow = this.messageWindow.filter((t) => now - t < 60000);
-    return this.messageWindow.length < 25;
+  _jitter(base) {
+    const variation = base * JITTER_FACTOR;
+    return Math.round(base - variation + Math.random() * variation * 2);
   }
 
-  queueMessage(sock, targetId, msg, rule) {
-    if (this.messageQueue.length >= MAX_QUEUE_SIZE) {
+  _checkDailyLimit(uid, limit) {
+    const now = Date.now();
+    if (now - this.lastDailyReset > 86400000) {
+      this.dailyCount.clear();
+      this.lastDailyReset = now;
+    }
+    const count = this.dailyCount.get(uid) || 0;
+    return count < limit;
+  }
+
+  _checkTargetThrottle(targetId) {
+    const now = Date.now();
+    const last = this.targetThrottle.get(targetId);
+    if (last && now - last < TARGET_THROTTLE_MS) return false;
+    this.targetThrottle.set(targetId, now);
+    if (this.targetThrottle.size > 5000) {
+      const cutoff = now - 120000;
+      for (const [key, ts] of this.targetThrottle) {
+        if (ts < cutoff) this.targetThrottle.delete(key);
+      }
+    }
+    return true;
+  }
+
+  canSend(uid, perMinLimit) {
+    const now = Date.now();
+    this.messageWindow = this.messageWindow.filter((t) => now - t < 60000);
+    return this.messageWindow.length < perMinLimit;
+  }
+
+  async queueMessage(sock, targetId, msg, rule, existingPendingId = null) {
+    if (this.messageQueue.length >= MAX_QUEUE_SIZE && !this.restoring) {
       logger.warn(`File pleine (${MAX_QUEUE_SIZE}), message ignoré vers ${targetId}`);
       return;
     }
-    this.messageQueue.push({ sock, targetId, msg, rule });
+    const item = { sock, targetId, msg, rule, retries: 0, pendingId: null };
+
+    if (existingPendingId) {
+      item.pendingId = existingPendingId;
+    } else {
+      try {
+        const doc = await PendingForward.create({
+          userId: rule.userId,
+          targetId,
+          ruleId: rule._id?.toString() || "auto",
+          ruleName: rule.name || "",
+          msgKey: msg.key,
+          msgData: msg.message,
+        });
+        item.pendingId = doc._id;
+      } catch (e) {
+        logger.warn(`Erreur persistance file: ${e.message}`);
+      }
+    }
+
+    this.messageQueue.push(item);
+
     if (!this.isProcessing) {
       this.processQueue().catch(e => logger.error("processQueue crash:", e));
     }
   }
 
-  addToBatch(sock, rule, msg, targets) {
+  async addToBatch(sock, rule, msg, targets) {
     const ruleId = rule._id.toString();
     if (!this.batchBuffer[ruleId]) {
-      this.batchBuffer[ruleId] = { messages: [], timer: null, forceTimer: null, targets: [], sock, rule };
+      this.batchBuffer[ruleId] = { entries: [], timer: null, forceTimer: null, sock, rule };
     }
     const batch = this.batchBuffer[ruleId];
-    batch.messages.push(cloneMsg(msg));
-    batch.targets = targets;
+
+    // Persister immédiatement chaque (msg, cible) pour survivre à un crash
+    const pendingEntries = [];
+    for (const targetId of targets) {
+      try {
+        const doc = await PendingForward.create({
+          userId: rule.userId,
+          targetId,
+          ruleId: rule._id?.toString() || "auto",
+          ruleName: rule.name || "",
+          msgKey: msg.key,
+          msgData: msg.message,
+        });
+        pendingEntries.push({ targetId, pendingId: doc._id });
+      } catch (e) {
+        logger.warn(`Erreur persistance batch: ${e.message}`);
+        pendingEntries.push({ targetId, pendingId: null });
+      }
+    }
+
+    batch.entries.push({ msg: cloneMsg(msg), targets, pendingEntries });
     batch.sock = sock;
     batch.rule = rule;
 
     if (!batch.forceTimer) {
       batch.forceTimer = setTimeout(() => {
-        logger.info(`Batch force-déclenché pour "${batch.rule.name}" après ${MAX_BATCH_WAIT_MS}ms (${batch.messages.length} msg(s))`);
+        logger.info(`Batch force-déclenché pour "${batch.rule.name}" après ${MAX_BATCH_WAIT_MS}ms (${batch.entries.length} msg(s))`);
         this.processBatch(ruleId).catch(e => logger.error("processBatch crash:", e));
       }, MAX_BATCH_WAIT_MS);
     }
 
-    if (batch.messages.length >= MAX_BATCH_SIZE) {
+    if (batch.entries.length >= MAX_BATCH_SIZE) {
       if (batch.timer) clearTimeout(batch.timer);
-      logger.info(`Batch déclenché par taille max pour "${batch.rule.name}" (${batch.messages.length} msg(s))`);
+      logger.info(`Batch déclenché par taille max pour "${batch.rule.name}" (${batch.entries.length} msg(s))`);
       this.processBatch(ruleId).catch(e => logger.error("processBatch crash:", e));
       return;
     }
@@ -333,100 +497,244 @@ class BroadcastManager {
   }
 
   async processBatch(ruleId) {
-    const batch = this.batchBuffer[ruleId];
-    if (!batch || !batch.messages.length) {
-      if (batch) delete this.batchBuffer[ruleId];
+    const batchKey = `processing_${ruleId}`;
+    if (this[batchKey]) {
+      logger.warn(`Batch ${ruleId} déjà en cours de traitement, ignoré`);
       return;
     }
-    delete this.batchBuffer[ruleId];
+    this[batchKey] = true;
+
+    try {
+      const batch = this.batchBuffer[ruleId];
+      if (!batch || !batch.entries.length) {
+        if (batch) delete this.batchBuffer[ruleId];
+        return;
+      }
+      delete this.batchBuffer[ruleId];
 
     if (batch.timer) clearTimeout(batch.timer);
     if (batch.forceTimer) clearTimeout(batch.forceTimer);
 
-    logger.info(`Batch "${batch.rule.name}": ${batch.messages.length} msg(s) → ${batch.targets.length} groupe(s)`);
+    const totalTargets = new Set(batch.entries.flatMap(e => e.targets)).size;
+      logger.debug(`Batch "${batch.rule.name}": ${batch.entries.length} msg(s) → ${totalTargets} groupe(s)`);
 
-    for (const targetId of batch.targets) {
-      for (const msg of batch.messages) {
-        this.queueMessage(batch.sock, targetId, msg, batch.rule);
-      }
+    for (const entry of batch.entries) {
+      await Promise.all(entry.targets.map(targetId => {
+        const pendingInfo = entry.pendingEntries?.find(p => p.targetId === targetId);
+        return this.queueMessage(batch.sock, targetId, entry.msg, batch.rule, pendingInfo?.pendingId || null);
+      }));
+    }
+    } finally {
+      delete this[batchKey];
     }
   }
 
   async processQueue() {
     this.isProcessing = true;
-    this.stopRequested = false;
+    this.restoring = false;
     let batchLogTimer = Date.now();
-    while (this.messageQueue.length) {
-      if (this.stopRequested) {
-        logger.info("Arrêt du forwarding demandé pendant l'envoi.");
-        this.messageQueue = [];
-        this.stopRequested = false;
-        break;
-      }
+    let consecutiveErrors = 0;
+    try {
+      while (this.messageQueue.length) {
+        const current = this.messageQueue[0];
+        const uid = current?.rule?.userId?.toString();
 
-      const now = Date.now();
-      this.errorWindow = this.errorWindow.filter((t) => now - t < 120000);
-      if (this.errorWindow.length > 5) {
-        this.adaptiveDelay = Math.min(this.adaptiveDelay + 0.5, 5);
-      } else if (now - this.lastErrorTime > 60000) {
-        this.adaptiveDelay = Math.max(this.adaptiveDelay - 0.1, 1);
-      }
-
-      const nextItem = this.messageQueue[0];
-      if (nextItem?.rule?.forwardToMembers) {
-        const elapsed = Date.now() - this.burstStartTime;
-        if (elapsed >= BURST_DURATION_MS) {
-          const cooldownMin = COOLDOWN_DURATION_MS / 60000;
-          logger.info(`Burst inbox terminé (${(elapsed/3600000).toFixed(1)}h), pause de ${cooldownMin}min...`);
-          await this.sleep(COOLDOWN_DURATION_MS);
-          this.burstStartTime = Date.now();
-          logger.info("Reprise du burst inbox après pause.");
+        if (uid && (this.stopRequested.has(uid) || this.forwardingPaused.has(uid))) {
+          logger.info(`Arrêt du forwarding pour user=${uid} pendant l'envoi. ${this.messageQueue.filter(item => item.rule?.userId?.toString() !== uid).length} message(s) conservés pour les autres utilisateurs.`);
+          this.messageQueue = this.messageQueue.filter(
+            item => item.rule?.userId?.toString() !== uid
+          );
+          this.stopRequested.delete(uid);
           continue;
         }
-      }
 
-      if (!this.canSend()) {
-        logger.warn(`File: ${this.messageQueue.length} en attente, limite atteinte, pause 10s...`);
-        await this.sleep(10000);
-        continue;
-      }
-
-      const { sock, targetId, msg, rule } = this.messageQueue.shift();
-
-      if (!sock) {
-        logger.warn("WhatsApp socket null pour un message. Passage au suivant.");
-        continue;
-      }
-
-      try {
-        await sock.sendPresenceUpdate("composing", targetId);
-
-        const baseDelay = 3000 + Math.floor(Math.random() * 4000);
-        const delay = Math.round(baseDelay * this.adaptiveDelay);
-        await this.sleep(delay);
-
-        await this.forwardMessage(sock, targetId, msg, rule);
-
-        this.messageWindow.push(Date.now());
-        this.messageCount++;
-
-        if (Date.now() - batchLogTimer > 10000) {
-          logger.info(`File: ${this.messageQueue.length} restant(s), ${this.messageCount} envoyé(s)`);
-          batchLogTimer = Date.now();
+        const now = Date.now();
+        this.errorWindow = this.errorWindow.filter((t) => now - t < 120000);
+        if (this.errorWindow.length > 5) {
+          this.adaptiveDelay = Math.min(this.adaptiveDelay + 0.5, 5);
+        } else if (now - this.lastErrorTime > 60000) {
+          this.adaptiveDelay = Math.max(this.adaptiveDelay - 0.1, 1);
         }
-      } catch (err) {
-        logger.error(`Erreur envoi vers ${targetId}: ${err.message}`);
-        this.errorWindow.push(Date.now());
-        this.lastErrorTime = Date.now();
-        const errMsg = err.message || "";
-        if (errMsg.includes("Closed") || errMsg.includes("closed") || errMsg.includes("not opened") || errMsg.includes("conflict")) {
-          logger.warn("Erreur socket détectée lors de l'envoi, message ignoré.");
+
+        if (now - this.lastErrorTime > 30000) {
+          consecutiveErrors = 0;
+        }
+
+        if (current?.rule?.forwardToMembers) {
+          const elapsed = Date.now() - this.burstStartTime;
+          if (elapsed >= BURST_DURATION_MS) {
+            const cooldownMin = COOLDOWN_DURATION_MS / 60000;
+            logger.info(`Burst inbox terminé (${(elapsed/3600000).toFixed(1)}h), pause de ${cooldownMin}min...`);
+            await this.sleep(COOLDOWN_DURATION_MS);
+            this.burstStartTime = Date.now();
+            logger.info("Reprise du burst inbox après pause.");
+            continue;
+          }
+        }
+
+        // Charger les paramètres de rate limiting pour cet utilisateur
+        let perMinLimit = DEFAULT_MSG_PER_MIN;
+        let delayBetween = MIN_DELAY_BASE_MS;
+        let dailyLimit = 5000;
+        if (uid) {
+          try {
+            const settings = await Setting.findOne({ userId: uid }).lean().maxTimeMS(3000);
+            if (settings) {
+              perMinLimit = Math.min(settings.rateLimitMessagesPerMinute || DEFAULT_MSG_PER_MIN, DEFAULT_MSG_PER_MIN);
+              delayBetween = Math.max(settings.rateLimitDelayBetween || MIN_DELAY_BASE_MS, MIN_DELAY_BASE_MS);
+              dailyLimit = settings.rateLimitDailyLimit || 5000;
+            }
+          } catch (e) {
+            logger.warn(`Erreur chargement settings pour user=${uid}: ${e.message}`);
+          }
+        }
+
+        // Vérifier limite quotidienne
+        if (!this._checkDailyLimit(uid, dailyLimit)) {
+          logger.warn(`Limite quotidienne atteinte pour user=${uid} (${dailyLimit}), pause de 1h...`);
+          await this.sleepWithCheck(3600000, uid);
+          continue;
+        }
+
+        // Vérifier limite par minute
+        if (!this.canSend(uid, perMinLimit)) {
+          const pause = Math.min(15000 + consecutiveErrors * 5000, 60000);
+          logger.warn(`File: ${this.messageQueue.length} en attente, limite ${perMinLimit}/min atteinte, pause ${pause/1000}s...`);
+          await this.sleepWithCheck(pause, uid);
+          continue;
+        }
+
+        const item = this.messageQueue.shift();
+        let { sock, targetId, msg, rule } = item;
+
+        // Tentative de récupération du socket s'il est nul
+        if (!sock && this.sockProvider && uid) {
+          try {
+            sock = await this.sockProvider(uid);
+            item.sock = sock;
+          } catch (e) {
+            logger.warn(`Échec récupération socket pour user=${uid}: ${e.message}`);
+          }
+        }
+
+        if (!sock) {
+          item.retries++;
+          if (item.retries > SOCKET_RETRIES_BEFORE_BACKOFF) {
+            logger.warn(`Socket nul pour ${targetId} après ${item.retries} tentative(s). Message conservé en BDD pour reprise ultérieure.`);
+            if (item.pendingId) {
+              await PendingForward.updateOne(
+                { _id: item.pendingId },
+                { $set: { retryCount: item.retries, lastError: "socket_null" } }
+              ).catch(() => {});
+            } else {
+              try {
+                const doc = await PendingForward.create({
+                  userId: rule.userId,
+                  targetId,
+                  ruleId: rule._id?.toString() || "auto",
+                  ruleName: rule.name || "",
+                  msgKey: msg.key,
+                  msgData: msg.message,
+                });
+                item.pendingId = doc._id;
+              } catch (e) {
+                logger.warn(`Erreur persistance message socket nul: ${e.message}`);
+              }
+            }
+            continue;
+          }
+          this.messageQueue.unshift(item);
+          const waitMs = Math.min(5000 + item.retries * 2000, 30000);
+          logger.warn(`Socket nul pour user=${uid}, attente ${waitMs/1000}s avant réessai (tentative ${item.retries}/${SOCKET_RETRIES_BEFORE_BACKOFF})...`);
+          await this.sleepWithCheck(waitMs, uid);
+          continue;
+        }
+
+        // Anti-ban: vérifier throttle par cible (pas plus d'1 msg/60s vers la même cible)
+        if (!this._checkTargetThrottle(targetId)) {
+          logger.debug(`Throttle cible ${targetId.split("@")[0]}, remis en fin de file`);
+          this.messageQueue.push(item);
+          await this.sleep(5000);
+          continue;
+        }
+
+        try {
+          // Anti-ban: warm-up progressif (début lent puis accélération)
+          const warmUpCount = this.warmUpCounts.get(uid) || 0;
+          let baseDelay = delayBetween + consecutiveErrors * 1000;
+          if (warmUpCount < WARM_UP_MESSAGES) {
+            const progress = warmUpCount / WARM_UP_MESSAGES;
+            const warmUpMul = WARM_UP_DELAY_MULTIPLIER - (WARM_UP_DELAY_MULTIPLIER - 1) * progress;
+            baseDelay = Math.round(baseDelay * warmUpMul);
+          }
+          baseDelay = Math.min(baseDelay, MAX_DELAY_BASE_MS);
+          const delay = this._jitter(baseDelay);
+          await this.sleep(delay);
+
+          await this.forwardMessage(sock, targetId, msg, rule);
+
+          consecutiveErrors = 0;
+          this.consecutiveSocketErrors.delete(uid);
+          this.messageWindow.push(Date.now());
+          this.messageCount++;
+
+          // Anti-ban: pauses aléatoires périodiques
+          this.messageSincePause++;
+          const pauseThreshold = RANDOM_PAUSE_INTERVAL_MIN + Math.floor(Math.random() * (RANDOM_PAUSE_INTERVAL_MAX - RANDOM_PAUSE_INTERVAL_MIN));
+          if (this.messageSincePause >= pauseThreshold) {
+            this.messageSincePause = 0;
+            const pauseDuration = this._jitter(RANDOM_PAUSE_MIN_MS + Math.random() * (RANDOM_PAUSE_MAX_MS - RANDOM_PAUSE_MIN_MS));
+            logger.info(`Pause anti-ban de ${Math.round(pauseDuration/1000)}s après ${this.messageCount} messages...`);
+            await this.sleep(pauseDuration);
+          }
+
+          // Mettre à jour les compteurs
+          if (uid) {
+            this.warmUpCounts.set(uid, warmUpCount + 1);
+            this.dailyCount.set(uid, (this.dailyCount.get(uid) || 0) + 1);
+          }
+
+          // Supprimer de la base après envoi réussi
+          if (item.pendingId) {
+            PendingForward.deleteOne({ _id: item.pendingId }).catch(() => {});
+          }
+
+          if (Date.now() - batchLogTimer > 30000) {
+            const daily = uid ? (this.dailyCount.get(uid) || 0) : 0;
+            logger.info(`File: ${this.messageQueue.length} restant(s), ${this.messageCount} envoyé(s), aujourd'hui: ${daily}/${dailyLimit}`);
+            batchLogTimer = Date.now();
+          }
+        } catch (err) {
+          logger.error(`Erreur envoi vers ${targetId}: ${err.message}`);
+          this.errorWindow.push(Date.now());
+          this.lastErrorTime = Date.now();
+          consecutiveErrors++;
+
+          if (item.retries < MAX_RETRIES) {
+            item.retries++;
+            const backoff = Math.min(item.retries * 10000, 60000);
+            logger.warn(`Retry ${item.retries}/${MAX_RETRIES} pour ${targetId} dans ${backoff/1000}s`);
+            this.messageQueue.push(item);
+            await this.sleepWithCheck(backoff, uid);
+            if (item.pendingId) {
+              PendingForward.updateOne(
+                { _id: item.pendingId },
+                { $set: { retryCount: item.retries, lastError: err.message } }
+              ).catch(() => {});
+            }
+          } else {
+            logger.warn(`Message vers ${targetId} abandonné après ${MAX_RETRIES} tentatives.`);
+            if (item.pendingId) {
+              PendingForward.deleteOne({ _id: item.pendingId }).catch(() => {});
+            }
+          }
         }
       }
-    }
-    this.isProcessing = false;
-    if (this.memCache.size > 0) {
-      this.memCache.clear();
+    } finally {
+      this.isProcessing = false;
+      if (this.memCache.size > 0) {
+        this.memCache.clear();
+      }
     }
   }
 
@@ -461,6 +769,10 @@ class BroadcastManager {
       try {
         const data = fs.readFileSync(cachePath);
         this.memCache.set(cacheKey, data);
+        if (this.memCache.size > MAX_MEM_CACHE) {
+          const firstKey = this.memCache.keys().next().value;
+          this.memCache.delete(firstKey);
+        }
         logger.info(`[MEDIA] Chargé depuis disque: ${(data.length / 1024 / 1024).toFixed(1)}MB`);
         return data;
       } catch (err) {
@@ -591,6 +903,20 @@ class BroadcastManager {
     }
   }
 
+  _textContent(msgContent, caption) {
+    if (!caption) return { text: "" };
+    const extMsg = msgContent?.extendedTextMessage;
+
+    // Conserver le contextInfo s'il contient des données de preview (lien, thumbnail, etc.)
+    // L'API WhatsApp ne génère pas automatiquement les previews de liens,
+    // donc on doit impérativement garder le contextInfo original
+    if (extMsg?.contextInfo) {
+      return { text: caption, contextInfo: extMsg.contextInfo };
+    }
+
+    return { text: caption };
+  }
+
   async forwardMessage(sock, targetId, msg, rule) {
     const rawContent = msg.message;
     const msgContent = getRealMessage(rawContent);
@@ -648,21 +974,23 @@ class BroadcastManager {
           }
           case "pollCreationMessage": {
             const poll = msgContent.pollCreationMessage;
+            if (!poll) break;
             await this._sendAndTrack(sock, targetId, {
               poll: {
-                name: poll.name,
-                values: poll.options.map(o => o.optionName),
-                selectableOptionsCount: poll.selectableOptionsCount
+                name: poll.name || "",
+                values: (poll.options || []).map(o => o.optionName || ""),
+                selectableOptionsCount: poll.selectableOptionsCount || 1
               }
             }, msg, rule);
             return;
           }
           case "locationMessage": {
             const loc = msgContent.locationMessage;
+            if (!loc) break;
             await this._sendAndTrack(sock, targetId, {
               location: {
-                degreesLatitude: loc.degreesLatitude,
-                degreesLongitude: loc.degreesLongitude,
+                degreesLatitude: loc.degreesLatitude || 0,
+                degreesLongitude: loc.degreesLongitude || 0,
                 name: loc.name || "",
                 address: loc.address || ""
               }
@@ -671,27 +999,29 @@ class BroadcastManager {
           }
           case "contactMessage": {
             const con = msgContent.contactMessage;
+            if (!con) break;
             await this._sendAndTrack(sock, targetId, {
               contacts: {
-                displayName: con.displayName,
-                contacts: [{ vcard: con.vcard }]
+                displayName: con.displayName || "",
+                contacts: [{ vcard: con.vcard || "" }]
               }
             }, msg, rule);
             return;
           }
           case "contactsArrayMessage": {
             const con = msgContent.contactsArrayMessage;
+            if (!con) break;
             await this._sendAndTrack(sock, targetId, {
               contacts: {
-                displayName: con.displayName,
-                contacts: con.contacts.map(c => ({ vcard: c.vcard }))
+                displayName: con.displayName || "",
+                contacts: (con.contacts || []).map(c => ({ vcard: c.vcard || "" }))
               }
             }, msg, rule);
             return;
           }
           default: {
             if (caption) {
-              await this._sendAndTrack(sock, targetId, { text: caption }, msg, rule);
+              await this._sendAndTrack(sock, targetId, this._textContent(msgContent, caption), msg, rule);
               return;
             }
             try {
@@ -709,7 +1039,7 @@ class BroadcastManager {
     }
 
     if (caption) {
-      await this._sendAndTrack(sock, targetId, { text: caption }, msg, rule);
+      await this._sendAndTrack(sock, targetId, this._textContent(msgContent, caption), msg, rule);
     } else {
       logger.debug(`[MEDIA] Aucun média ni caption à envoyer vers ${targetId.split("@")[0]}`);
     }
@@ -777,7 +1107,7 @@ class BroadcastManager {
       masterGroup: rule.masterGroup,
       time: new Date().toISOString(),
     };
-    logger.info(`Activité forwarding: "${rule.name}" → ${targetCount} cible(s), ${data.mediaLabel}, sender: ${senderJid.split("@")[0]}`);
+    logger.debug(`Activité forwarding: "${rule.name}" → ${targetCount} cible(s), ${data.mediaLabel}, sender: ${senderJid.split("@")[0]}`);
     if (emitToUserFn && rule.userId) {
       emitToUserFn(rule.userId, "forwarding:activity", data);
     } else {
@@ -787,6 +1117,142 @@ class BroadcastManager {
 
   sleep(ms) {
     return new Promise((r) => setTimeout(r, ms));
+  }
+
+  sleepWithCheck(ms, uid) {
+    const CHECK_INTERVAL = 500;
+    return new Promise((resolve) => {
+      const start = Date.now();
+      const id = setInterval(() => {
+        if (uid && (this.stopRequested.has(uid) || this.forwardingPaused.has(uid))) {
+          clearInterval(id);
+          resolve(true);
+          return;
+        }
+        if (Date.now() - start >= ms) {
+          clearInterval(id);
+          resolve(false);
+        }
+      }, CHECK_INTERVAL);
+    });
+  }
+
+  async restorePending(sockProvider) {
+    this.restoring = true;
+    try {
+      const pending = await PendingForward.find().sort({ createdAt: 1 }).lean();
+      if (!pending.length) { this.restoring = false; return; }
+      logger.info(`Restauration de ${pending.length} message(s) en attente de forwarding...`);
+      let restored = 0;
+      let skipped = 0;
+      for (const p of pending) {
+        const sock = await sockProvider(p.userId);
+        if (!sock) {
+          skipped++;
+          logger.warn(`Socket introuvable pour user=${p.userId}, message conservé dans PendingForward`);
+          continue;
+        }
+        const rule = {
+          userId: p.userId,
+          _id: p.ruleId,
+          name: p.ruleName || "restored",
+        };
+        const msg = {
+          key: p.msgKey || {},
+          message: p.msgData || {},
+          messageTimestamp: Math.floor(p.createdAt.getTime() / 1000),
+        };
+        // queueMessage va créer une NOUVELLE entrée PendingForward (garantie BDD)
+        await this.queueMessage(sock, p.targetId, msg, rule);
+        // Supprimer l'ANCIENNE entrée maintenant que la nouvelle existe
+        await PendingForward.deleteOne({ _id: p._id });
+        restored++;
+      }
+      logger.info(`${restored} message(s) restaurés dans la file d'attente, ${skipped} conservés en BDD (socket indisponible)`);
+      this.restoring = false;
+      if (!this.isProcessing && this.messageQueue.length) {
+        this.processQueue().catch(e => logger.error("processQueue (restore) crash:", e));
+      }
+    } catch (err) {
+      this.restoring = false;
+      logger.error(`Erreur restauration file: ${err.message}`);
+    }
+  }
+
+  async restorePendingForUser(userId, sockProvider) {
+    try {
+      const sock = await sockProvider(userId);
+      if (!sock) {
+        logger.warn(`Socket introuvable pour restorePendingForUser user=${userId}`);
+        return 0;
+      }
+      return await this.restoreUserPending(userId, sock);
+    } catch (err) {
+      logger.error(`Erreur restorePendingForUser user=${userId}: ${err.message}`);
+      return 0;
+    }
+  }
+
+  async restoreUserPending(userId, sock) {
+    try {
+      const pending = await PendingForward.find({ userId }).sort({ createdAt: 1 }).lean();
+      if (!pending.length) return 0;
+      logger.info(`Restauration de ${pending.length} message(s) en attente pour user=${userId}...`);
+      let restored = 0;
+      for (const p of pending) {
+        const rule = {
+          userId: p.userId,
+          _id: p.ruleId,
+          name: p.ruleName || "restored",
+        };
+        const msg = {
+          key: p.msgKey || {},
+          message: p.msgData || {},
+          messageTimestamp: Math.floor(p.createdAt.getTime() / 1000),
+        };
+        await this.queueMessage(sock, p.targetId, msg, rule);
+        await PendingForward.deleteOne({ _id: p._id });
+        restored++;
+      }
+      logger.info(`${restored} message(s) restaurés pour user=${userId}`);
+      if (!this.isProcessing && this.messageQueue.length) {
+        this.processQueue().catch(e => logger.error("processQueue (user restore) crash:", e));
+      }
+      return restored;
+    } catch (err) {
+      logger.error(`Erreur restauration file pour user=${userId}: ${err.message}`);
+      return 0;
+    }
+  }
+
+  async flushQueueToDB() {
+    const items = this.messageQueue.slice();
+    if (!items.length) return 0;
+    let persisted = 0;
+    for (const item of items) {
+      if (!item.pendingId) {
+        try {
+          const doc = await PendingForward.create({
+            userId: item.rule.userId,
+            targetId: item.targetId,
+            ruleId: item.rule._id?.toString() || "auto",
+            ruleName: item.rule.name || "",
+            msgKey: item.msg.key,
+            msgData: item.msg.message,
+          });
+          item.pendingId = doc._id;
+          persisted++;
+        } catch (e) {
+          logger.warn(`Erreur persistance flushQueueToDB: ${e.message}`);
+        }
+      }
+    }
+    logger.info(`flushQueueToDB: ${persisted} message(s) persistés, ${items.length} total en file`);
+    return persisted;
+  }
+
+  pendingCount() {
+    return this.messageQueue.length;
   }
 
   setIO(instance, emitFn) {

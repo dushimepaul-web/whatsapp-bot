@@ -26,6 +26,7 @@ exports.list = async (req, res) => {
     const broadcasts = await Broadcast.find({ userId: req.user._id }).sort({ createdAt: -1 });
     res.json({ broadcasts });
   } catch (err) {
+    logger.error("Erreur liste broadcasts:", err);
     res.status(500).json({ error: "Erreur serveur" });
   }
 };
@@ -36,6 +37,7 @@ exports.get = async (req, res) => {
     if (!broadcast) return res.status(404).json({ error: "Campagne introuvable" });
     res.json({ broadcast });
   } catch (err) {
+    logger.error("Erreur get broadcast:", err);
     res.status(500).json({ error: "Erreur serveur" });
   }
 };
@@ -45,12 +47,18 @@ exports.send = async (req, res) => {
     const broadcast = await Broadcast.findOne({ _id: req.params.id, userId: req.user._id });
     if (!broadcast) return res.status(404).json({ error: "Campagne introuvable" });
 
+    // Mettre à jour le statut immédiatement
+    broadcast.status = "queued";
+    broadcast.startedAt = new Date();
+    await broadcast.save();
+
     broadcastService.sendBroadcast(broadcast._id, req.user._id).catch((err) => {
       logger.error("Erreur envoi broadcast:", err);
     });
 
     res.json({ message: "Campagne en cours d'envoi", broadcast });
   } catch (err) {
+    logger.error("Erreur send broadcast:", err);
     res.status(500).json({ error: "Erreur serveur" });
   }
 };
@@ -69,6 +77,7 @@ exports.stats = async (req, res) => {
       totalSent: totalSent[0]?.total || 0,
     });
   } catch (err) {
+    logger.error("Erreur stats broadcast:", err);
     res.status(500).json({ error: "Erreur serveur" });
   }
 };

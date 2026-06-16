@@ -8,10 +8,11 @@ const broadcastSchema = new mongoose.Schema({
   targetMembers: [{ type: String }],
   toAllGroups: { type: Boolean, default: false },
   toAllMembers: { type: Boolean, default: false },
-  status: { type: String, enum: ["pending", "sending", "completed", "failed"], default: "pending" },
+  status: { type: String, enum: ["pending", "queued", "sending", "completed", "failed"], default: "pending" },
   sentCount: { type: Number, default: 0 },
   failedCount: { type: Number, default: 0 },
   totalCount: { type: Number, default: 0 },
+  startedAt: { type: Date },
 }, { timestamps: true });
 
 module.exports = mongoose.model("Broadcast", broadcastSchema);

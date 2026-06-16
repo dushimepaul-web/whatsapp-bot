@@ -27,6 +27,7 @@ exports.list = async (req, res) => {
     const rules = await ForwardingRule.find({ userId: req.user._id });
     res.json({ rules });
   } catch (err) {
+    logger.error("Erreur liste règles:", err);
     res.status(500).json({ error: "Erreur serveur" });
   }
 };
@@ -37,6 +38,7 @@ exports.get = async (req, res) => {
     if (!rule) return res.status(404).json({ error: "Règle introuvable" });
     res.json({ rule });
   } catch (err) {
+    logger.error("Erreur get règle:", err);
     res.status(500).json({ error: "Erreur serveur" });
   }
 };
@@ -55,6 +57,7 @@ exports.update = async (req, res) => {
     if (!rule) return res.status(404).json({ error: "Règle introuvable" });
     res.json({ rule });
   } catch (err) {
+    logger.error("Erreur update règle:", err);
     res.status(500).json({ error: "Erreur serveur" });
   }
 };
@@ -65,6 +68,7 @@ exports.remove = async (req, res) => {
     if (!rule) return res.status(404).json({ error: "Règle introuvable" });
     res.json({ message: "Règle supprimée" });
   } catch (err) {
+    logger.error("Erreur remove règle:", err);
     res.status(500).json({ error: "Erreur serveur" });
   }
 };
@@ -87,6 +91,7 @@ exports.toggle = async (req, res) => {
     await rule.save();
     res.json({ rule });
   } catch (err) {
+    logger.error("Erreur toggle règle:", err);
     res.status(500).json({ error: "Erreur serveur" });
   }
 };

@@ -2,11 +2,14 @@ const mongoose = require("mongoose");
 const config = require("./index");
 const logger = require("../utils/logger");
 
-const connectDB = async (retries = 3) => {
+mongoose.set("strictQuery", true);
+
+const connectDB = async (retries = 5) => {
   while (retries > 0) {
     try {
       const conn = await mongoose.connect(config.mongoUri, {
         serverSelectionTimeoutMS: 5000,
+        authSource: "admin",
       });
       logger.info(`MongoDB connectée: ${conn.connection.host}`);
       return conn;

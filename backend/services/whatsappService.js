@@ -63,6 +63,17 @@ class WhatsAppService {
   }
 
   async connect(userId, fresh = false, pairingPhone = null) {
+    // S'assurer que le document de session existe pour stocker le QR
+    try {
+      const existing = await this._getSessionDoc(userId);
+      if (!existing) {
+        const WhatsappSession = require("../models/WhatsappSession");
+        await WhatsappSession.create({ userId });
+      }
+    } catch (e) {
+      logger.warn(`Erreur création session doc user=${userId}: ${e.message}`);
+    }
+
     const session = this._getSession(userId);
     if (session.isConnecting) {
       logger.warn(`Connexion déjà en cours pour user=${userId}, ignoré`);
@@ -103,6 +114,7 @@ class WhatsAppService {
       shouldSyncHistoryMessage: () => false,
       generateHighQualityLinkPreview: true,
       connectTimeoutMs: 60000,
+      keepAliveIntervalMs: 15000, // Ping toutes les 15s pour garder la session active
       ...(pairingPhone ? { getMessage: async () => undefined } : {}),
     });
 
@@ -220,14 +232,21 @@ class WhatsAppService {
             this.connect(userId, false).catch((e) => logger.error(`Échec reconnexion user=${userId}:`, e));
           } else if (reasonCode === DisconnectReason.loggedOut) {
             logger.error(`Session expirée user=${userId}. Nettoie auth_info.`);
+            session.isConnecting = false;
             this.clearAuthDir(userId);
             if (s) {
               s.qrCode = null;
               s.phone = null;
               await s.save();
             }
+            logger.info(`Tentative de reconnexion avec nouvelle session pour user=${userId}...`);
+            await delay(3000);
+            this.connect(userId, true).catch((e) => logger.error(`Échec reconnexion user=${userId}:`, e));
           } else {
-            logger.warn(`Déconnecté user=${userId} (${reasonText}).`);
+            logger.warn(`Déconnecté user=${userId} (${reasonText}). Reconnexion dans 5s...`);
+            session.isConnecting = false;
+            await delay(5000);
+            this.connect(userId, false).catch((e) => logger.error(`Échec reconnexion user=${userId}:`, e));
           }
         }
       } catch (err) {

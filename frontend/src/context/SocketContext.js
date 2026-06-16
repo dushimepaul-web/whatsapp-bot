@@ -1,6 +1,7 @@
 import React, { createContext, useEffect, useState } from "react";
 import { io } from "socket.io-client";
 import { useAuth } from "../hooks/useAuth";
+import { getToken } from "../services/api";
 
 export const SocketContext = createContext();
 
@@ -19,7 +20,9 @@ export const SocketProvider = ({ children }) => {
       return;
     }
 
-    const token = localStorage.getItem("token");
+    const token = getToken();
+    if (!token) return;
+
     const s = io("/", {
       auth: { token },
       transports: ["websocket", "polling"],

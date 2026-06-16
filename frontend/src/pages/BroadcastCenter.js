@@ -2,18 +2,24 @@ import React, { useState, useEffect } from "react";
 import api from "../services/api";
 import { formatDate } from "../utils/helpers";
 import { useMediaQuery } from "../hooks/useMediaQuery";
+import { useToast } from "../components/Toast";
 
 const BroadcastCenter = () => {
   const isMobile = useMediaQuery("(max-width: 768px)");
+  const { showToast, Toast } = useToast();
   const [tab, setTab] = useState("new");
   const [groups, setGroups] = useState([]);
   const [broadcasts, setBroadcasts] = useState([]);
   const [form, setForm] = useState({ type: "text", content: "", caption: "", targetGroups: [], targetMembers: [], toAllGroups: false, toAllMembers: false });
   const [sending, setSending] = useState(false);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    api.get("/groups").then(({ data }) => setGroups(data.groups)).catch(() => {});
-    api.get("/broadcast").then(({ data }) => setBroadcasts(data.broadcasts)).catch(() => {});
+    setLoading(true);
+    Promise.all([
+      api.get("/groups").then(({ data }) => setGroups(data.groups)).catch(() => {}),
+      api.get("/broadcast").then(({ data }) => setBroadcasts(data.broadcasts)).catch(() => {}),
+    ]).finally(() => setLoading(false));
   }, []);
 
   const toggleGroup = (id) => {
@@ -36,12 +42,14 @@ const BroadcastCenter = () => {
       const res = await api.get("/broadcast");
       setBroadcasts(res.data.broadcasts);
     } catch (err) {
-      alert(err.response?.data?.error || "Erreur");
+      showToast(err.response?.data?.error || "Erreur", "error");
     }
     setSending(false);
   };
 
   return (
+    <>
+    {Toast}
     <div>
       <h2 style={styles.pageTitle}>Centre de Broadcast</h2>
       <div style={styles.tabs}>
@@ -125,6 +133,7 @@ const BroadcastCenter = () => {
         </div>
       )}
     </div>
+    </>
   );
 };
 

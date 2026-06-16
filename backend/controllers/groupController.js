@@ -31,6 +31,7 @@ exports.members = async (req, res) => {
     const members = await groupManager.getGroupMembers(req.params.id, req.user._id);
     res.json({ members });
   } catch (err) {
+    logger.error(`Erreur membres groupe: ${err.message}`);
     res.status(500).json({ error: "Erreur serveur" });
   }
 };
@@ -40,6 +41,7 @@ exports.admins = async (req, res) => {
     const admins = await groupManager.getGroupAdmins(req.params.id, req.user._id);
     res.json({ admins });
   } catch (err) {
+    logger.error(`Erreur admins groupe: ${err.message}`);
     res.status(500).json({ error: "Erreur serveur" });
   }
 };
@@ -49,6 +51,7 @@ exports.stats = async (req, res) => {
     const stats = await groupManager.getStats(req.user._id);
     res.json(stats);
   } catch (err) {
+    logger.error(`Erreur stats groupes: ${err.message}`);
     res.status(500).json({ error: "Erreur serveur" });
   }
 };
@@ -59,6 +62,7 @@ exports.refresh = async (req, res) => {
     await whatsappService.syncGroups(req.user._id);
     res.json({ message: "Groupes synchronisés" });
   } catch (err) {
+    logger.error(`Erreur refresh groupes: ${err.message}`);
     res.status(500).json({ error: "Erreur serveur" });
   }
 };
@@ -75,6 +79,7 @@ exports.toggleVisibility = async (req, res) => {
     if (!group) return res.status(404).json({ error: "Groupe introuvable" });
     res.json({ group });
   } catch (err) {
+    logger.error(`Erreur toggleVisibility: ${err.message}`);
     res.status(500).json({ error: "Erreur serveur" });
   }
 };
@@ -91,6 +96,7 @@ exports.toggleRestrict = async (req, res) => {
     if (!group) return res.status(404).json({ error: "Groupe introuvable" });
     res.json({ group });
   } catch (err) {
+    logger.error(`Erreur toggleRestrict: ${err.message}`);
     res.status(500).json({ error: "Erreur serveur" });
   }
 };

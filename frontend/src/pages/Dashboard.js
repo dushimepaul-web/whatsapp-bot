@@ -106,9 +106,9 @@ const Dashboard = () => {
   useEffect(() => {
     statusPollRef.current = setInterval(fetchStatus, 5000);
     return () => {
-      if (connectPollRef.current) clearInterval(connectPollRef.current);
-      if (pairPollRef.current) clearInterval(pairPollRef.current);
-      if (statusPollRef.current) clearInterval(statusPollRef.current);
+      if (connectPollRef.current) { clearInterval(connectPollRef.current); connectPollRef.current = null; }
+      if (pairPollRef.current) { clearInterval(pairPollRef.current); pairPollRef.current = null; }
+      if (statusPollRef.current) { clearInterval(statusPollRef.current); statusPollRef.current = null; }
     };
   }, []);
 

@@ -6,7 +6,7 @@ exports.getStatus = async (req, res) => {
   try {
     const userId = req.user._id;
     const status = await whatsappService.getStatus(userId);
-    const session = await whatsappService._getSessionDoc(userId);
+    const session = await whatsappService.getSessionDoc(userId);
     res.json({ ...status, session });
   } catch (err) {
     logger.error({ err: err.message || err, stack: err.stack }, "Erreur statut");
@@ -22,7 +22,7 @@ exports.connect = async (req, res) => {
       await whatsappService.disconnect(userId);
     }
 
-    let session = await whatsappService._getSessionDoc(userId);
+    let session = await whatsappService.getSessionDoc(userId);
     if (!session) {
       session = await WhatsappSession.create({ userId });
     }
@@ -57,7 +57,7 @@ exports.disconnect = async (req, res) => {
 exports.getQr = async (req, res) => {
   try {
     const userId = req.user._id;
-    const session = await whatsappService._getSessionDoc(userId);
+    const session = await whatsappService.getSessionDoc(userId);
     res.json({ qr: session?.qrCode || null });
   } catch (err) {
     logger.error("Erreur getQr:", err);
@@ -78,7 +78,7 @@ exports.pair = async (req, res) => {
       await whatsappService.disconnect(userId);
     }
 
-    let session = await whatsappService._getSessionDoc(userId);
+    let session = await whatsappService.getSessionDoc(userId);
     if (!session) {
       session = await WhatsappSession.create({ userId });
     }

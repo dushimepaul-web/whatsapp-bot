@@ -21,7 +21,7 @@ exports.update = async (req, res) => {
     const allowedFields = [
       "prefix", "rateLimitMessagesPerMinute", "rateLimitDelayBetween",
       "rateLimitDailyLimit", "moderationEnabled", "autoRejectCalls", "welcomeMessage",
-      "forwardingKeyword", "masterGroupKeyword",
+      "forwardingKeyword", "masterGroupKeyword", "inboxKeyword", "autoRestrictKeyword", "commandGroupName",
       "autoReplies", "telegramToken", "telegramChatId",
       "notifyOnDisconnect", "notifyOnError", "notifyOnNewUser",
       "webhookUrl", "webhookApiKey",
@@ -47,7 +47,7 @@ exports.update = async (req, res) => {
 exports.consoleAccess = async (req, res) => {
   try {
     const userId = req.user._id;
-    const session = await whatsappService._getSessionDoc(userId);
+    const session = await whatsappService.getSessionDoc(userId);
     const userPhone = session?.phone || null;
 
     let allowed = false;

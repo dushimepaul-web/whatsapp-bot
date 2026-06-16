@@ -1,14 +1,18 @@
 import React, { useState, useEffect } from "react";
 import api from "../services/api";
 import { useMediaQuery } from "../hooks/useMediaQuery";
+import { useToast } from "../components/Toast";
+import { COLORS } from "../constants";
 
 const Forwarding = () => {
   const isMobile = useMediaQuery("(max-width: 768px)");
+  const { showToast, Toast } = useToast();
   const [rules, setRules] = useState([]);
   const [groups, setGroups] = useState([]);
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState(null);
   const [syncing, setSyncing] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [form, setForm] = useState({
     name: "", sourceGroupId: "", targetGroupIds: [],
     forwardToAllGroups: false, forwardToMembers: false,
@@ -19,6 +23,7 @@ const Forwarding = () => {
   useEffect(() => { load(); }, []);
 
   const load = async (showmsg) => {
+    setLoading(true);
     try {
       const [r, g] = await Promise.all([
         api.get("/forwarding"),
@@ -27,22 +32,23 @@ const Forwarding = () => {
       const groupsData = g.data.groups || [];
       setGroups(groupsData);
       setRules(r.data.rules || []);
-      if (showmsg) alert(`Groupes chargés: ${groupsData.length}`);
+      if (showmsg) showToast(`Groupes chargés: ${groupsData.length}`);
     } catch (e) {
       if (e.code !== "ERR_CANCELED" && e.message !== "Request aborted") {
         console.error("Erreur chargement:", e);
-        if (showmsg) alert(`Erreur: ${e.message}`);
+        if (showmsg) showToast(`Erreur: ${e.message}`, "error");
       }
     }
+    setLoading(false);
   };
 
   const handleSync = async () => {
     setSyncing(true);
     try {
       await api.post("/groups/refresh");
-      alert("Synchronisation réussie");
+      showToast("Synchronisation réussie");
     } catch (e) {
-      alert(`Erreur lors de la synchronisation: ${e.message}`);
+      showToast(`Erreur: ${e.message}`, "error");
     }
     await load();
     setSyncing(false);
@@ -72,11 +78,11 @@ const Forwarding = () => {
 
   const handleSubmit = async () => {
     if (!form.name.trim() || !form.sourceGroupId) {
-      alert("Le nom et le groupe source sont requis.");
+      showToast("Le nom et le groupe source sont requis.", "error");
       return;
     }
     if (!form.forwardToAllGroups && form.targetGroupIds.length === 0 && !form.forwardToMembers) {
-      alert("Veuillez sélectionner au moins un groupe cible ou cocher 'Tous les groupes'.");
+      showToast("Sélectionnez au moins un groupe cible ou cochez 'Tous les groupes'.", "error");
       return;
     }
     try {
@@ -87,8 +93,9 @@ const Forwarding = () => {
       }
       resetForm();
       load();
+      showToast(editing ? "Règle modifiée" : "Règle créée");
     } catch (e) {
-      alert("Erreur lors de la sauvegarde.");
+      showToast("Erreur lors de la sauvegarde.", "error");
     }
   };
 
@@ -114,6 +121,8 @@ const Forwarding = () => {
   const getGroupName = (gid) => groups.find((g) => g.groupId === gid)?.name || gid?.split("@")[0] || gid;
 
   return (
+    <>
+    {Toast}
     <div style={styles.container}>
       <div style={styles.header(isMobile)}>
         <div style={styles.headerInfo}>
@@ -309,6 +318,7 @@ const Forwarding = () => {
         ))}
       </div>
     </div>
+    </>
   );
 };
 

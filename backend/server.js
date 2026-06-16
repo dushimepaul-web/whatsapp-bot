@@ -90,6 +90,16 @@ const start = async () => {
 
   setTimeout(restoreSessions, 2000);
 
+  // Fournir le provider de socket au BroadcastManager
+  broadcastManager.setSockProvider(async (userId) => whatsappService.getSocket(userId));
+
+  // Restauration des forwards en attente après reconnexion
+  setTimeout(async () => {
+    await broadcastManager.restorePending(
+      async (userId) => whatsappService.getSocket(userId)
+    );
+  }, 6000);
+
   // Nettoyage règle en double
   setTimeout(async () => {
     try {
@@ -121,7 +131,22 @@ process.on("SIGINT", shutdown);
 async function shutdown() {
   logger.info("Arrêt gracieux...");
   try {
-    await new Promise((resolve) => server.close(resolve));
+    // Persister les messages mémoire restants dans PendingForward
+    const persisted = await broadcastManager.flushQueueToDB();
+    if (persisted > 0) {
+      logger.info(`${persisted} message(s) persistés en base avant arrêt`);
+    }
+
+    // Attendre la fin de la file d'attente (max 60s)
+    const pending = broadcastManager.pendingCount();
+    if (pending > 0) {
+      logger.info(`Attente de ${pending} message(s) en cours d'envoi...`);
+      for (let i = 0; i < 60; i++) {
+        if (broadcastManager.pendingCount() === 0) break;
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+    }
+    server.close();
     await whatsappService.disconnectAll();
     await mongoose.disconnect();
   } catch (err) {

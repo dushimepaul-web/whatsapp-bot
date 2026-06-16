@@ -3,9 +3,10 @@ const Group = require("../models/Group");
 const Member = require("../models/Member");
 const ForwardingRule = require("../models/ForwardingRule");
 const ForwardedMessage = require("../models/ForwardedMessage");
+const Setting = require("../models/Setting");
 const Log = require("../models/Log");
 const broadcastManager = require("./broadcastManager");
-const { extractCommand } = require("../utils/helpers");
+const { extractCommand, escapeRegex } = require("../utils/helpers");
 
 const COMMANDS = {
   help: { desc: "Affiche la liste des commandes disponibles" },
@@ -14,7 +15,8 @@ const COMMANDS = {
   broadcast: { desc: "Lance une campagne broadcast (texte après la commande)" },
   forwarding: { desc: "Affiche l'état des règles de forwarding actives" },
   list: { desc: "Liste les groupes cibles (page: /list, /list 2, ...)" },
-  stop: { desc: "Arrête le transfert en cours (les règles restent actives)" },
+  stop: { desc: "Arrête définitivement le forwarding et vide la file d'attente" },
+  resume: { desc: "Réactive le forwarding après un /stop" },
   stats: { desc: "Affiche les statistiques globales du bot" },
   logs: { desc: "Affiche les dernières actions (admin)" },
 };
@@ -102,9 +104,11 @@ class CommandHandler {
       }
 
       const groupInfo = await Group.findOne({ groupId: from, userId }).lean();
-      if (!groupInfo || groupInfo.name?.toLowerCase() !== "preparation group") {
+      const settings = await Setting.findOne({ userId }).lean();
+      const allowedGroup = settings?.commandGroupName || "preparation group";
+      if (!groupInfo || groupInfo.name?.toLowerCase() !== allowedGroup.toLowerCase()) {
         await sock.sendMessage(from, {
-          text: "❌ Les commandes sont autorisées uniquement dans le groupe « preparation ».",
+          text: `❌ Les commandes sont autorisées uniquement dans le groupe « ${allowedGroup} ».`,
         });
         return;
       }
@@ -146,6 +150,9 @@ class CommandHandler {
           break;
         case "stop":
           await this.cmdStop(sock, from, userId, respond);
+          break;
+        case "resume":
+          await this.cmdResume(sock, from, userId, respond);
           break;
         case "stats":
           await this.cmdStats(respond, userId);
@@ -228,30 +235,44 @@ class CommandHandler {
   async cmdForwarding(respond, userId) {
     const rules = await ForwardingRule.find({ userId, isActive: true });
     if (!rules.length) {
-      await respond("📭 Aucune règle de forwarding active.");
+      let msg = "📭 Aucune règle de forwarding active.";
+      if (broadcastManager.isPaused(userId)) {
+        msg += `\n\n⚠️ Le forwarding est en pause. Utilisez /resume pour réactiver.`;
+      }
+      await respond(msg);
       return;
     }
 
-    let msg = `🔄 *Règles de forwarding actives (${rules.length})*\n\n`;
+    const setting = await Setting.findOne({ userId }).lean();
+    const pausedLabel = broadcastManager.isPaused(userId) ? "⚠️ *(EN PAUSE)*" : "";
+    let msg = `🔄 *Règles de forwarding actives (${rules.length})* ${pausedLabel}\n\n`;
     for (const rule of rules) {
       const source = await Group.findOne({ groupId: rule.sourceGroupId, userId });
       msg += `➤ *${rule.name}*\n`;
       msg += `  Source: ${source?.name || rule.sourceGroupId}\n`;
-      let ciblesCount = 0;
-      if (rule.forwardToAllGroups || rule.masterGroup) {
-        const pattern = rule.targetGroupPattern;
-        const query = pattern
-          ? { userId, name: { $regex: pattern, $options: "i" } }
+      if (rule.forwardToMembers) {
+        let pattern = rule.targetGroupPattern;
+        if (!pattern) pattern = setting?.forwardingKeyword || "";
+        const memberQuery = pattern
+          ? { userId, groupId: { $in: (await Group.find({ userId, name: { $regex: escapeRegex(pattern), $options: "i" } }).select('groupId').lean()).map(g => g.groupId) } }
           : { userId };
-        ciblesCount = await Group.countDocuments(query);
-        const sourceGroup = await Group.findOne({ groupId: rule.sourceGroupId, userId });
-        if (sourceGroup && (!pattern || new RegExp(pattern, "i").test(sourceGroup.name))) {
+        const memberCount = await Member.countDocuments(memberQuery);
+        msg += `  Membres cibles: ${memberCount}\n`;
+      } else if (rule.forwardToAllGroups || rule.masterGroup) {
+        let pattern = rule.targetGroupPattern;
+        if (!pattern) pattern = setting?.forwardingKeyword || "";
+        const query = pattern
+          ? { userId, name: { $regex: escapeRegex(pattern), $options: "i" } }
+          : { userId };
+        let ciblesCount = await Group.countDocuments(query);
+        if (source && (!pattern || new RegExp(escapeRegex(pattern), "i").test(source.name))) {
           ciblesCount--;
         }
+        msg += `  Cibles: ${ciblesCount}\n`;
       } else {
-        ciblesCount = rule.targetGroupIds?.length || 0;
+        const ciblesCount = rule.targetGroupIds?.length || 0;
+        msg += `  Cibles: ${ciblesCount}\n`;
       }
-      msg += `  Cibles: ${ciblesCount}\n`;
       msg += `  Master: ${rule.masterGroup ? "✅" : "❌"} | Membres: ${rule.forwardToMembers ? "✅" : "❌"}\n\n`;
     }
 
@@ -294,14 +315,27 @@ class CommandHandler {
   }
 
   async cmdStop(sock, from, userId, respond) {
-    broadcastManager.stop(userId);
+    await broadcastManager.stop(userId);
 
-    await respond(`🛑 *Transfert en cours arrêté*\n\nLes règles de forwarding sont toujours actives et reprendront au prochain message.`);
+    await respond(`🛑 *Forwarding définitivement arrêté*\n\nTous les messages en attente (file mémoire + BDD) ont été supprimés. Utilisez /resume pour réactiver le forwarding.`);
 
     await logger.db({
       userId,
       type: "system",
       action: "forwarding_stopped_via_command",
+      details: { from },
+    });
+  }
+
+  async cmdResume(sock, from, userId, respond) {
+    broadcastManager.resume(userId);
+
+    await respond(`✅ *Forwarding réactivé*\n\nLe forwarding des nouveaux messages va reprendre.`);
+
+    await logger.db({
+      userId,
+      type: "system",
+      action: "forwarding_resumed_via_command",
       details: { from },
     });
   }

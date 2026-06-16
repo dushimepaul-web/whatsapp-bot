@@ -10,7 +10,7 @@ const REFRESH_COOKIE = "refreshToken";
 const cookieOpts = () => ({
   httpOnly: true,
   secure: config.env === "production",
-  sameSite: config.env === "production" ? "strict" : "lax",
+  sameSite: "none",
   path: "/api/auth",
   maxAge: 7 * 24 * 60 * 60 * 1000,
 });
@@ -35,9 +35,17 @@ const clearRefreshCookie = (res) => {
 
 exports.register = async (req, res) => {
   try {
+    // En production, seul un admin peut créer des comptes
+    if (config.env === "production" && req.user?.role !== "admin") {
+      return res.status(403).json({ error: "Inscription réservée aux administrateurs en production" });
+    }
+
     const { name, email, password } = req.body;
     if (!name || !email || !password) {
       return res.status(400).json({ error: "Tous les champs sont requis" });
+    }
+    if (password.length < 8) {
+      return res.status(400).json({ error: "Le mot de passe doit contenir au moins 8 caractères" });
     }
     const exists = await User.findOne({ email });
     if (exists) {
@@ -58,7 +66,7 @@ exports.register = async (req, res) => {
       }
     }
 
-    res.status(201).json({ user, token: tokens.token });
+    res.status(201).json({ user, token: tokens.token, refreshToken: tokens.refreshToken });
   } catch (err) {
     logger.error("Erreur register:", err);
     res.status(500).json({ error: "Erreur serveur" });
@@ -79,7 +87,7 @@ exports.login = async (req, res) => {
     user.refreshToken = tokens.refreshToken;
     await user.save();
     setRefreshCookie(res, tokens.refreshToken);
-    res.json({ user, token: tokens.token });
+    res.json({ user, token: tokens.token, refreshToken: tokens.refreshToken });
   } catch (err) {
     logger.error("Erreur login:", err);
     res.status(500).json({ error: "Erreur serveur" });
@@ -88,7 +96,7 @@ exports.login = async (req, res) => {
 
 exports.refresh = async (req, res) => {
   try {
-    const refreshToken = req.cookies?.[REFRESH_COOKIE];
+    const refreshToken = req.cookies?.[REFRESH_COOKIE] || req.headers["x-refresh-token"] || req.body?.refreshToken;
     if (!refreshToken) {
       return res.status(401).json({ error: "Refresh token requis" });
     }
@@ -134,5 +142,67 @@ exports.stats = async (req, res) => {
   } catch (err) {
     logger.error("Erreur stats:", err);
     res.status(500).json({ error: "Erreur serveur" });
+  }
+};
+
+// Génère un token de réinitialisation de mot de passe
+exports.forgotPassword = async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email) return res.status(400).json({ error: "Email requis" });
+
+    const user = await User.findOne({ email });
+    if (!user) return res.status(404).json({ error: "Aucun compte avec cet email" });
+
+    const resetToken = jwt.sign({ id: user._id, purpose: "reset" }, config.jwt.secret, { expiresIn: "1h" });
+    user.resetPasswordToken = resetToken;
+    user.resetPasswordExpires = new Date(Date.now() + 3600000);
+    await user.save();
+
+    logger.info(`Token de réinitialisation généré pour ${email}`);
+
+    // TODO: En production, envoyer un email avec le lien:
+    //   `${req.protocol}://${req.get("host")}/reset-password/${resetToken}`
+    // En développement, on loggue le token dans la console pour debug
+    if (config.env !== "production") {
+      logger.info(`[DEV] Reset token pour ${email}: ${resetToken}`);
+    }
+
+    res.json({ message: "Si l'email existe, un lien de réinitialisation a été envoyé" });
+  } catch (err) {
+    logger.error("Erreur forgotPassword:", err);
+    res.status(500).json({ error: "Erreur serveur" });
+  }
+};
+
+exports.resetPassword = async (req, res) => {
+  try {
+    const { token } = req.params;
+    const { password } = req.body;
+    if (!password || password.length < 8) {
+      return res.status(400).json({ error: "Le mot de passe doit contenir au moins 8 caractères" });
+    }
+
+    const decoded = jwt.verify(token, config.jwt.secret);
+    if (decoded.purpose !== "reset") {
+      return res.status(400).json({ error: "Token invalide" });
+    }
+
+    const user = await User.findById(decoded.id);
+    if (!user || user.resetPasswordToken !== token || user.resetPasswordExpires < new Date()) {
+      return res.status(400).json({ error: "Token expiré ou invalide" });
+    }
+
+    user.password = password;
+    user.resetPasswordToken = undefined;
+    user.resetPasswordExpires = undefined;
+    user.refreshToken = null;
+    await user.save();
+
+    logger.info(`Mot de passe réinitialisé pour user=${decoded.id}`);
+    res.json({ message: "Mot de passe réinitialisé avec succès" });
+  } catch (err) {
+    logger.error("Erreur resetPassword:", err);
+    res.status(400).json({ error: "Token invalide ou expiré" });
   }
 };

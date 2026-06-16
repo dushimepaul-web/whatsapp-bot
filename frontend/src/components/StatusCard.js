@@ -1,4 +1,5 @@
 import React from "react";
+import PropTypes from "prop-types";
 
 const StatusCard = ({ icon, label, value, color }) => (
   <div style={styles.card}>
@@ -11,6 +12,13 @@ const StatusCard = ({ icon, label, value, color }) => (
     </div>
   </div>
 );
+
+StatusCard.propTypes = {
+  icon: PropTypes.string.isRequired,
+  label: PropTypes.string.isRequired,
+  value: PropTypes.oneOfType([PropTypes.string, PropTypes.number]).isRequired,
+  color: PropTypes.string.isRequired,
+};
 
 const styles = {
   card: { backgroundColor: "#fff", borderRadius: 10, padding: 20, display: "flex", alignItems: "center", gap: 16, boxShadow: "0 1px 3px rgba(0,0,0,0.08)" },

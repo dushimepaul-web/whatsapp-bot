@@ -12,5 +12,6 @@ const forwardedMessageSchema = new mongoose.Schema({
 
 forwardedMessageSchema.index({ sourceMsgId: 1, sourceGroupId: 1, userId: 1 });
 forwardedMessageSchema.index({ targetMsgId: 1 });
+forwardedMessageSchema.index({ userId: 1, forwardedAt: -1 });
 
 module.exports = mongoose.model("ForwardedMessage", forwardedMessageSchema);

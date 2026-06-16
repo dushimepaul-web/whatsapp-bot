@@ -10,9 +10,11 @@ const Members = () => {
   const [message, setMessage] = useState("");
   const [sending, setSending] = useState(false);
   const [result, setResult] = useState(null);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    api.get("/members", { params: { limit: 200 } }).then(({ data }) => setMembers(data.members)).catch(() => {});
+    setLoading(true);
+    api.get("/members", { params: { limit: 200 } }).then(({ data }) => setMembers(data.members)).catch(() => {}).finally(() => setLoading(false));
   }, []);
 
   const toggleSelect = (jid) => {
@@ -46,6 +48,10 @@ const Members = () => {
     const q = search.toLowerCase();
     return (m.name?.toLowerCase().includes(q) || m.pushName?.toLowerCase().includes(q) || m.jid?.toLowerCase().includes(q));
   });
+
+  if (loading) {
+    return <div style={{ display: "flex", justifyContent: "center", alignItems: "center", height: "60vh", color: "#8696a0", fontSize: 16 }}><span style={{ display: "inline-block", width: 20, height: 20, border: "2px solid #e0e0e0", borderTopColor: "#075e54", borderRadius: "50%", animation: "spin 0.6s linear infinite", marginRight: 8 }} /> Chargement des membres...</div>;
+  }
 
   return (
     <div>

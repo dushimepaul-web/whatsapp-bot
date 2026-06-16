@@ -37,6 +37,27 @@ exports.send = async (req, res) => {
 
     let result;
     if (type === "image") {
+      // Vérification SSRF pour les URLs d'image
+      const isValidUrl = (str) => {
+        try {
+          const u = new URL(str);
+          if (u.protocol !== "http:" && u.protocol !== "https:") return false;
+          const host = u.hostname.toLowerCase();
+          if (host === "localhost" || host === "127.0.0.1" || host === "::1") return false;
+          if (host.endsWith(".local") || host.endsWith(".internal")) return false;
+          const parts = host.split(".").map(Number);
+          if (parts.length === 4 && parts.every(p => !isNaN(p))) {
+            if (parts[0] === 10 || parts[0] === 127 || parts[0] === 0) return false;
+            if (parts[0] === 169 && parts[1] === 254) return false;
+            if (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) return false;
+            if (parts[0] === 192 && parts[1] === 168) return false;
+          }
+          return true;
+        } catch { return false; }
+      };
+      if (!isValidUrl(text)) {
+        return res.status(400).json({ error: "URL d'image invalide ou non autorisée" });
+      }
       result = await sock.sendMessage(targetJid, {
         image: { url: text },
         caption: req.body.caption || "",
