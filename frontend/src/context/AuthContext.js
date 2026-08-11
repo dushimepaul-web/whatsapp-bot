@@ -1,5 +1,5 @@
 import React, { createContext, useState, useEffect, useCallback } from "react";
-import api, { setToken, setRefreshToken, clearToken, getRefreshToken } from "../services/api";
+import api from "../services/api";
 
 export const AuthContext = createContext();
 
@@ -8,17 +8,20 @@ export const AuthProvider = ({ children }) => {
   const [loading, setLoading] = useState(true);
 
   const loadUser = useCallback(async () => {
+    const token = localStorage.getItem("token");
+    if (!token) {
+      setLoading(false);
+      return;
+    }
+    api.defaults.headers.common["Authorization"] = `Bearer ${token}`;
     try {
-      const headers = {};
-      const rt = getRefreshToken();
-      if (rt) headers["x-refresh-token"] = rt;
-      const { data } = await api.post("/auth/refresh", {}, { headers });
-      setToken(data.token);
-      const me = await api.get("/auth/me");
-      setUser(me.data.user);
+      const { data } = await api.get("/auth/me");
+      const freshToken = localStorage.getItem("token");
+      api.defaults.headers.common["Authorization"] = `Bearer ${freshToken}`;
+      setUser(data.user);
     } catch {
-      clearToken();
-      setUser(null);
+      localStorage.removeItem("token");
+      delete api.defaults.headers.common["Authorization"];
     }
     setLoading(false);
   }, []);
@@ -27,23 +30,24 @@ export const AuthProvider = ({ children }) => {
 
   const login = async (email, password) => {
     const { data } = await api.post("/auth/login", { email, password });
-    setToken(data.token);
-    setRefreshToken(data.refreshToken);
+    localStorage.setItem("token", data.token);
+    api.defaults.headers.common["Authorization"] = `Bearer ${data.token}`;
     setUser(data.user);
     return data;
   };
 
   const register = async (name, email, password) => {
     const { data } = await api.post("/auth/register", { name, email, password });
-    setToken(data.token);
-    setRefreshToken(data.refreshToken);
+    localStorage.setItem("token", data.token);
+    api.defaults.headers.common["Authorization"] = `Bearer ${data.token}`;
     setUser(data.user);
     return data;
   };
 
   const logout = async () => {
     try { await api.post("/auth/logout"); } catch {}
-    clearToken();
+    localStorage.removeItem("token");
+    delete api.defaults.headers.common["Authorization"];
     setUser(null);
   };
 

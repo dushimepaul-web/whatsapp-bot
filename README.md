@@ -119,7 +119,6 @@ pm2 startup
 | POST | /api/groups/refresh | Synchroniser |
 | GET | /api/members | Liste membres |
 | POST | /api/members/send-message | Message privé |
-| GET/POST | /api/forwarding | Règles de forwarding |
 | GET/POST | /api/broadcast | Campagnes broadcast |
 | POST | /api/broadcast/:id/send | Envoyer campagne |
 | GET/PUT | /api/settings | Paramètres |
@@ -131,7 +130,7 @@ pm2 startup
 - Gestion des groupes et membres
 - Modération automatique (suppression des médias des membres)
 - Diffusion de messages (broadcast)
-- Règles de forwarding entre groupes
+- Campagnes membres (publicité privée)
 - Messages privés aux membres
 - Anti-spam et rate limiting
 - Dashboard temps réel via Socket.io

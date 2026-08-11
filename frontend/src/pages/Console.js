@@ -9,7 +9,7 @@ const KEYWORDS = [
   { pattern: /✅/, label: "success", color: "#00a884" },
   { pattern: /⚠️|warning|warn/gi, label: "warn", color: "#ffc107" },
   { pattern: /❌|error|fail|échec|erreur/gi, label: "error", color: "#ef5350" },
-  { pattern: /➡️|→|envoyé|forward/gi, label: "send", color: "#34b7f1" },
+  { pattern: /➡️|→|envoyé/gi, label: "send", color: "#34b7f1" },
   { pattern: /🔁|reconnect|reconnexion/gi, label: "reconnect", color: "#ff9800" },
   { pattern: /🔌|déconnect|disconnect/gi, label: "disconnect", color: "#f44336" },
   { pattern: /📡|socket|connecté/i, label: "socket", color: "#9c27b0" },

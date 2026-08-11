@@ -19,14 +19,14 @@ const logger = require("../utils/logger");
 const moderation = require("../whatsapp/moderation");
 const commands = require("../whatsapp/commands");
 const notifier = require("../utils/notifier");
-const broadcastManager = require("../whatsapp/broadcastManager");
-const { applyDefaultConfig } = require("./defaultConfig");
 
 class WhatsAppService {
   constructor() {
     this.sessions = new Map();
     this.baseAuthDir = path.join(__dirname, "..", "auth_info");
-    this._syncing = false;
+    this.RECONNECT_BASE_DELAY = 3000;
+    this.RECONNECT_MAX_DELAY = 30000;
+    this.RECONNECT_MAX_ATTEMPTS = 15;
   }
 
   _getSession(userId) {
@@ -42,9 +42,66 @@ class WhatsAppService {
         statusCallback: null,
         pairingCodeCallback: null,
         authDir: path.join(this.baseAuthDir, key),
+        reconnectCount: 0,
+        reconnectTimer: null,
       });
     }
     return this.sessions.get(key);
+  }
+
+  _clearReconnectTimer(session) {
+    if (session.reconnectTimer) {
+      clearTimeout(session.reconnectTimer);
+      session.reconnectTimer = null;
+    }
+  }
+
+  _scheduleReconnect(userId) {
+    const session = this._getSession(userId);
+    this._clearReconnectTimer(session);
+
+    const delay = Math.min(
+      this.RECONNECT_BASE_DELAY * Math.pow(2, session.reconnectCount),
+      this.RECONNECT_MAX_DELAY
+    );
+
+    if (session.reconnectCount >= this.RECONNECT_MAX_ATTEMPTS) {
+      logger.error(`Reconnexion abandonnée pour user=${userId} après ${session.reconnectCount} tentatives`);
+      return;
+    }
+
+    session.reconnectCount++;
+    logger.info(`Reconnexion planifiée pour user=${userId} (tentative ${session.reconnectCount}/${this.RECONNECT_MAX_ATTEMPTS}) dans ${delay}ms`);
+
+    session.reconnectTimer = setTimeout(async () => {
+      session.reconnectTimer = null;
+      const s = this._getSession(userId);
+      if (s.isConnecting || s.isConnected) return;
+      this.connect(userId, false).catch(e =>
+        logger.error(`Échec reconnexion user=${userId}:`, e.message || e)
+      );
+    }, delay);
+  }
+
+  async _notifyGroupsServerStarted(sock, userId) {
+    try {
+      const groups = await Group.find({ userId, isRestricted: true }).lean();
+      if (!groups.length) return;
+      const total = groups.length;
+      const msg = `🔔 *Serveur prêt* — ${total} groupes cibles surveillés\n_Connexion WhatsApp établie_`;
+      const BATCH = 15;
+      const DELAY = 2000;
+      for (let i = 0; i < groups.length; i += BATCH) {
+        const batch = groups.slice(i, i + BATCH);
+        await Promise.allSettled(batch.map(g =>
+          sock.sendMessage(g.groupId, { text: msg }).catch(() => {})
+        ));
+        if (i + BATCH < groups.length) await new Promise(r => setTimeout(r, DELAY));
+      }
+      logger.info(`Notification démarrage envoyée à ${total} groupes (user=${userId})`);
+    } catch (err) {
+      logger.error(`Erreur _notifyGroupsServerStarted user=${userId}:`, err.message || err);
+    }
   }
 
   _removeSession(userId) {
@@ -62,18 +119,7 @@ class WhatsAppService {
     }
   }
 
-  async connect(userId, fresh = false, pairingPhone = null) {
-    // S'assurer que le document de session existe pour stocker le QR
-    try {
-      const existing = await this._getSessionDoc(userId);
-      if (!existing) {
-        const WhatsappSession = require("../models/WhatsappSession");
-        await WhatsappSession.create({ userId });
-      }
-    } catch (e) {
-      logger.warn(`Erreur création session doc user=${userId}: ${e.message}`);
-    }
-
+  async connect(userId, fresh = false, pairingPhone = null, notifyOnConnect = false) {
     const session = this._getSession(userId);
     if (session.isConnecting) {
       logger.warn(`Connexion déjà en cours pour user=${userId}, ignoré`);
@@ -114,7 +160,6 @@ class WhatsAppService {
       shouldSyncHistoryMessage: () => false,
       generateHighQualityLinkPreview: true,
       connectTimeoutMs: 60000,
-      keepAliveIntervalMs: 15000, // Ping toutes les 15s pour garder la session active
       ...(pairingPhone ? { getMessage: async () => undefined } : {}),
     });
 
@@ -160,9 +205,9 @@ class WhatsAppService {
           session.isConnected = true;
           session.isConnecting = false;
           session.isPairing = false;
+          session.reconnectCount = 0;
           const phone = sock.user?.id ? sock.user.id.split("@")[0].split(":")[0] : null;
           if (session.statusCallback) session.statusCallback("connected");
-          broadcastManager.startMasterPolling(sock, userId);
 
           const s = await this._getSessionDoc(userId);
           if (s) {
@@ -172,9 +217,6 @@ class WhatsAppService {
             s.pairingCode = null;
             await s.save();
           }
-
-          // Restaurer les messages en attente pour cet utilisateur
-          broadcastManager.restorePendingForUser(userId, async (uid) => this.getSocket(uid));
 
           logger.info(`WhatsApp connecté pour user=${userId}: ${phone}`);
           await logger.db({
@@ -186,9 +228,13 @@ class WhatsAppService {
 
           notifier.notifyConnect(userId, phone).catch(() => {});
 
-          await this.syncGroups(userId);
+          if (notifyOnConnect) {
+            this._notifyGroupsServerStarted(sock, userId).catch(e =>
+              logger.error(`Erreur notification démarrage user=${userId}:`, e.message || e)
+            );
+          }
 
-          await applyDefaultConfig(userId, phone);
+          await this.syncGroups(userId);
         }
 
         if (connection === "close") {
@@ -196,7 +242,7 @@ class WhatsAppService {
           session.isConnected = false;
           session.isConnecting = false;
           session.isPairing = false;
-          broadcastManager.stopMasterPolling(userId);
+          this._clearReconnectTimer(session);
           if (session.statusCallback) session.statusCallback("disconnected");
 
           let reasonCode = undefined;
@@ -212,6 +258,10 @@ class WhatsAppService {
           const s = await this._getSessionDoc(userId);
           const phone = s?.phone || null;
           if (s) {
+            if (reasonCode === DisconnectReason.loggedOut) {
+              s.qrCode = null;
+              s.phone = null;
+            }
             s.status = "disconnected";
             await s.save();
           }
@@ -220,33 +270,12 @@ class WhatsAppService {
             notifier.notifyDisconnect(userId, phone, reasonText).catch(() => {});
           }
 
-          if (reasonCode === DisconnectReason.restartRequired) {
-            logger.info(`Restart requis pour user=${userId}. Reconnexion automatique...`);
-            await delay(3000);
-            session.isConnecting = false;
-            this.connect(userId, false).catch((e) => logger.error(`Échec reconnexion user=${userId}:`, e));
-          } else if (wasConnected && reasonCode && reasonCode !== DisconnectReason.loggedOut) {
-            logger.info(`Reconnexion dans 3s pour user=${userId}...`);
-            await delay(3000);
-            session.isConnecting = false;
-            this.connect(userId, false).catch((e) => logger.error(`Échec reconnexion user=${userId}:`, e));
-          } else if (reasonCode === DisconnectReason.loggedOut) {
+          if (reasonCode === DisconnectReason.loggedOut) {
             logger.error(`Session expirée user=${userId}. Nettoie auth_info.`);
-            session.isConnecting = false;
             this.clearAuthDir(userId);
-            if (s) {
-              s.qrCode = null;
-              s.phone = null;
-              await s.save();
-            }
-            logger.info(`Tentative de reconnexion avec nouvelle session pour user=${userId}...`);
-            await delay(3000);
-            this.connect(userId, true).catch((e) => logger.error(`Échec reconnexion user=${userId}:`, e));
+            session.reconnectCount = 0;
           } else {
-            logger.warn(`Déconnecté user=${userId} (${reasonText}). Reconnexion dans 5s...`);
-            session.isConnecting = false;
-            await delay(5000);
-            this.connect(userId, false).catch((e) => logger.error(`Échec reconnexion user=${userId}:`, e));
+            this._scheduleReconnect(userId);
           }
         }
       } catch (err) {
@@ -273,36 +302,16 @@ class WhatsAppService {
           if (!from) continue;
           if (!from.endsWith("@g.us")) continue;
 
-          if (!msg.key.fromMe) {
-            try {
-              await commands.handle(sock, msg, from, userId);
-            } catch (cmdErr) {
-              logger.error(`Erreur commande: ${cmdErr.message || cmdErr}`);
-            }
+          if (!msg.key.fromMe && settings?.moderationEnabled) {
+            moderation.handleMessage(sock, msg, from, userId);
           }
 
-          if (!msg.key.fromMe && settings?.moderationEnabled) {
-            try {
-              await moderation.handleMessage(sock, msg, from, userId);
-            } catch (modErr) {
-              logger.error(`Erreur modération: ${modErr.message || modErr}`);
-            }
+          if (!msg.key.fromMe) {
+            await commands.handle(sock, msg, from, userId);
           }
 
           if (!msg.key.fromMe && settings?.autoReplies?.length) {
-            try {
-              await this.handleAutoReplies(sock, msg, from, userId, settings);
-            } catch (arErr) {
-              logger.error(`Erreur auto-réponse: ${arErr.message || arErr}`);
-            }
-          }
-
-          if (!msg.key.fromMe) {
-            try {
-              broadcastManager.handleIncoming(sock, msg, from, userId);
-            } catch (bcErr) {
-              logger.error(`Erreur broadcast: ${bcErr.message || bcErr}`);
-            }
+            await this.handleAutoReplies(sock, msg, from, userId, settings);
           }
         }
       } catch (e) {
@@ -353,8 +362,10 @@ class WhatsAppService {
 
   async disconnect(userId) {
     const session = this._getSession(userId);
+    this._clearReconnectTimer(session);
     session.isConnecting = false;
     session.isConnected = false;
+    session.reconnectCount = 0;
     if (session.sock) {
       try { session.sock.end(undefined); } catch (e) { logger.warn(`Erreur fermeture socket disconnect user=${userId}:`, e); }
       session.sock = null;
@@ -375,11 +386,6 @@ class WhatsAppService {
     }
   }
 
-  // Méthode publique pour accéder au document de session
-  async getSessionDoc(userId) {
-    return this._getSessionDoc(userId);
-  }
-
   async getStatus(userId) {
     const session = this._getSession(userId);
     return {
@@ -389,26 +395,11 @@ class WhatsAppService {
     };
   }
 
-  _normalizeJid(jid) {
-    if (!jid) return null;
-    const at = jid.indexOf("@");
-    if (at === -1) return null;
-    const local = jid.substring(0, at).split(":")[0];
-    return local + jid.substring(at);
-  }
-
-  _getBotJids(sockUser) {
-    const jids = [];
-    if (sockUser?.id) jids.push(this._normalizeJid(sockUser.id));
-    if (sockUser?.lid) jids.push(this._normalizeJid(sockUser.lid));
-    return jids.filter(Boolean);
-  }
-
   async syncGroups(userId) {
     const session = this._getSession(userId);
     if (!session.sock) return;
     try {
-      const botJids = this._getBotJids(session.sock.user);
+      const botPhone = session.sock.user?.id ? session.sock.user.id.split("@")[0].split(":")[0] : null;
       const groups = await session.sock.groupFetchAllParticipating();
       const entries = Object.entries(groups);
       const processedGroupIds = [];
@@ -423,10 +414,8 @@ class WhatsAppService {
           processedGroupIds.push(id);
           const metadata = g;
           const admins = (metadata.participants || []).filter((p) => p.admin).map((p) => p.id);
-          const botIsAdmin = botJids.length > 0 && admins.some((a) => {
-            const cleanAdmin = a.split(":")[0];
-            return botJids.some((bj) => cleanAdmin === bj);
-          });
+const adminPhones = admins.map(a => a.split("@")[0].split(":")[0]);
+          const botIsAdmin = botPhone ? adminPhones.includes(botPhone) : false;
           const updateData = {
             userId,
             name: metadata.subject,
@@ -437,11 +426,7 @@ class WhatsAppService {
             botIsAdmin,
             lastSync: new Date(),
           };
-          // Vérification auto-restriction basée sur le nom du groupe
-          // Le pattern est rendu configurable via settings
-          const groupSettings = await Setting.findOne({ userId }).lean();
-          const restrictedKeyword = groupSettings?.autoRestrictKeyword || "";
-          if (restrictedKeyword && new RegExp(restrictedKeyword, "i").test(metadata.subject)) {
+          if (/nufotec|alimentation/i.test(metadata.subject)) {
             updateData.isRestricted = true;
           }
           await Group.findOneAndUpdate(
@@ -500,13 +485,11 @@ class WhatsAppService {
     const session = this._getSession(userId);
     if (!session.sock) return null;
     try {
-      const botJids = this._getBotJids(session.sock.user);
+      const botPhone = session.sock.user?.id ? session.sock.user.id.split("@")[0].split(":")[0] : null;
       const metadata = await session.sock.groupMetadata(groupId);
       const admins = (metadata.participants || []).filter((p) => p.admin).map((p) => p.id);
-      const botIsAdmin = botJids.length > 0 && admins.some((a) => {
-        const cleanAdmin = a.split(":")[0];
-        return botJids.some((bj) => cleanAdmin === bj);
-      });
+      const adminPhones = admins.map(a => a.split("@")[0].split(":")[0]);
+      const botIsAdmin = botPhone ? adminPhones.includes(botPhone) : false;
 
       const updateData = {
         userId,
@@ -518,9 +501,7 @@ class WhatsAppService {
         botIsAdmin,
         lastSync: new Date(),
       };
-      const groupSettings = await Setting.findOne({ userId }).lean();
-      const restrictedKeyword = groupSettings?.autoRestrictKeyword || "";
-      if (restrictedKeyword && new RegExp(restrictedKeyword, "i").test(metadata.subject)) {
+      if (/nufotec|alimentation/i.test(metadata.subject)) {
         updateData.isRestricted = true;
       }
       const group = await Group.findOneAndUpdate(
@@ -587,6 +568,11 @@ class WhatsAppService {
     return session.sock || null;
   }
 
+  isConnecting(userId) {
+    const session = this._getSession(userId);
+    return session.isConnecting;
+  }
+
   getConnectedPhones() {
     const result = {};
     for (const [key, session] of this.sessions.entries()) {
@@ -638,25 +624,16 @@ class WhatsAppService {
   }
 
   async syncAllGroups() {
-    if (this._syncing) {
-      logger.warn("Sync déjà en cours, ignoré.");
-      return 0;
-    }
-    this._syncing = true;
-    try {
-      const ids = this.getConnectedUserIds();
-      for (const userId of ids) {
-        try {
-          logger.info(`Sync auto des groupes pour user=${userId}...`);
-          await this.syncGroups(userId);
-        } catch (e) {
-          logger.error(`Erreur sync auto user=${userId}:`, e);
-        }
+    const ids = this.getConnectedUserIds();
+    for (const userId of ids) {
+      try {
+        logger.info(`Sync auto des groupes pour user=${userId}...`);
+        await this.syncGroups(userId);
+      } catch (e) {
+        logger.error(`Erreur sync auto user=${userId}:`, e);
       }
-      return ids.length;
-    } finally {
-      this._syncing = false;
     }
+    return ids.length;
   }
 }
 

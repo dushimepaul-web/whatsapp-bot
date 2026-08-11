@@ -4,8 +4,7 @@ import { useMediaQuery } from "../hooks/useMediaQuery";
 import api from "../services/api";
 import StatusCard from "../components/StatusCard";
 
-const INITIAL_LOADING = { connect: false, pair: false, disconnect: false };
-let activityIdCounter = 0;
+const INITIAL_LOADING = { connect: false, pair: false, disconnect: false, refresh: false };
 
 const Dashboard = () => {
   const { socket } = useSocket();
@@ -16,13 +15,12 @@ const Dashboard = () => {
   const [phoneNumber, setPhoneNumber] = useState("");
   const [pairingCode, setPairingCode] = useState(null);
   const [loading, setLoading] = useState(INITIAL_LOADING);
-  const [forwardActivity, setForwardActivity] = useState([]);
-  const [forwardingActive, setForwardingActive] = useState(false);
-  const [stoppingForward, setStoppingForward] = useState(false);
+  const [autoRejectCalls, setAutoRejectCalls] = useState(true);
   const [syncing, setSyncing] = useState(false);
   const [pageLoading, setPageLoading] = useState(true);
   const connectPollRef = useRef(null);
   const pairPollRef = useRef(null);
+  const refreshPollRef = useRef(null);
   const statusPollRef = useRef(null);
 
   const fetchStatus = async () => {
@@ -38,23 +36,16 @@ const Dashboard = () => {
     } catch {}
   };
 
-  const checkActiveRules = async () => {
-    try {
-      const res = await api.get("/forwarding");
-      const active = (res.data?.rules || []).some((r) => r.isActive);
-      setForwardingActive(active);
-    } catch {}
-  };
-
   useEffect(() => {
     const load = async () => {
       try {
-        const [grp, brd, wa, logsRes, usr] = await Promise.all([
+        const [grp, brd, wa, logsRes, usr, settingsRes] = await Promise.all([
           api.get("/groups/stats"),
           api.get("/broadcast/stats"),
           api.get("/whatsapp/status"),
           api.get("/logs", { params: { limit: 10 } }),
           api.get("/auth/stats"),
+          api.get("/settings"),
         ]);
         setStats({ 
           groups: grp.data.totalGroups || 0, 
@@ -68,9 +59,9 @@ const Dashboard = () => {
           qr: wa.data.session?.qrCode || null, 
           phone: wa.data.phone || null 
         });
+        if (settingsRes.data?.settings) setAutoRejectCalls(settingsRes.data.settings.autoRejectCalls !== false);
         setLogs(logsRes.data.logs || []);
       } catch {}
-      checkActiveRules();
       setPageLoading(false);
     };
     load();
@@ -87,18 +78,11 @@ const Dashboard = () => {
       if (status === "connected") setPairingCode(null);
     });
     socket.on("whatsapp:pairingCode", ({ code }) => setPairingCode(code));
-    socket.on("forwarding:activity", (data) => {
-      setForwardActivity((prev) => [{ ...data, _id: activityIdCounter++ }, ...prev].slice(0, 50));
-      setForwardingActive(true);
-    });
-    socket.on("forwarding:stopped", () => { setForwardingActive(false); checkActiveRules(); });
     socket.on("connect", () => fetchStatus());
     return () => {
       socket.off("whatsapp:qr");
       socket.off("whatsapp:status");
       socket.off("whatsapp:pairingCode");
-      socket.off("forwarding:activity");
-      socket.off("forwarding:stopped");
       socket.off("connect", fetchStatus);
     };
   }, [socket]);
@@ -106,26 +90,52 @@ const Dashboard = () => {
   useEffect(() => {
     statusPollRef.current = setInterval(fetchStatus, 5000);
     return () => {
-      if (connectPollRef.current) { clearInterval(connectPollRef.current); connectPollRef.current = null; }
-      if (pairPollRef.current) { clearInterval(pairPollRef.current); pairPollRef.current = null; }
-      if (statusPollRef.current) { clearInterval(statusPollRef.current); statusPollRef.current = null; }
+      if (connectPollRef.current) clearInterval(connectPollRef.current);
+      if (pairPollRef.current) clearInterval(pairPollRef.current);
+      if (refreshPollRef.current) clearInterval(refreshPollRef.current);
+      if (statusPollRef.current) clearInterval(statusPollRef.current);
     };
   }, []);
 
+  const handleToggleCalls = async () => {
+    const newVal = !autoRejectCalls;
+    try {
+      await api.put("/settings", { autoRejectCalls: newVal });
+      setAutoRejectCalls(newVal);
+    } catch {}
+  };
+
   const handleConnect = async () => {
+    if (connectPollRef.current) clearInterval(connectPollRef.current);
     setLoading((s) => ({ ...s, connect: true }));
     setWhatsapp((s) => ({ ...s, status: "connecting", qr: null }));
     try {
       await api.post("/whatsapp/connect");
-      let attempts = 0;
+      const startTime = Date.now();
+      const TIMEOUT_MS = 3 * 60 * 1000;
       const poll = setInterval(async () => {
-        attempts++;
-        if (attempts > 60) { clearInterval(poll); setLoading((s) => ({ ...s, connect: false })); return; }
+        if (Date.now() - startTime > TIMEOUT_MS) {
+          clearInterval(poll);
+          setLoading((s) => ({ ...s, connect: false }));
+          return;
+        }
         try {
-          const res = await api.get("/whatsapp/qr");
-          if (res.data?.qr) { setWhatsapp((s) => ({ ...s, qr: res.data.qr })); clearInterval(poll); setLoading((s) => ({ ...s, connect: false })); }
+          const statusRes = await api.get("/whatsapp/status");
+          const sessionStatus = statusRes.data?.session?.status;
+          if (sessionStatus === "connected") {
+            setWhatsapp((s) => ({ ...s, status: "connected", qr: null }));
+            clearInterval(poll);
+            setLoading((s) => ({ ...s, connect: false }));
+            return;
+          }
+          const qr = statusRes.data?.session?.qrCode;
+          if (qr) {
+            setWhatsapp((s) => ({ ...s, qr }));
+            clearInterval(poll);
+            setLoading((s) => ({ ...s, connect: false }));
+          }
         } catch {}
-      }, 1000);
+      }, 3000);
       connectPollRef.current = poll;
     } catch {
       setLoading((s) => ({ ...s, connect: false }));
@@ -133,9 +143,48 @@ const Dashboard = () => {
   };
 
   const handleDisconnect = async () => {
+    if (connectPollRef.current) clearInterval(connectPollRef.current);
+    if (refreshPollRef.current) clearInterval(refreshPollRef.current);
     setLoading((s) => ({ ...s, disconnect: true }));
     try { await api.post("/whatsapp/disconnect"); setWhatsapp({ status: "disconnected", qr: null, phone: null }); setPairingCode(null); } catch {}
     setLoading((s) => ({ ...s, disconnect: false }));
+  };
+
+  const handleFreshConnect = async () => {
+    if (refreshPollRef.current) clearInterval(refreshPollRef.current);
+    setLoading((s) => ({ ...s, refresh: true }));
+    setWhatsapp((s) => ({ ...s, status: "connecting", qr: null }));
+    try {
+      await api.post("/whatsapp/connect?fresh=true");
+      const startTime = Date.now();
+      const TIMEOUT_MS = 3 * 60 * 1000;
+      const poll = setInterval(async () => {
+        if (Date.now() - startTime > TIMEOUT_MS) {
+          clearInterval(poll);
+          setLoading((s) => ({ ...s, refresh: false }));
+          return;
+        }
+        try {
+          const statusRes = await api.get("/whatsapp/status");
+          const sessionStatus = statusRes.data?.session?.status;
+          if (sessionStatus === "connected") {
+            setWhatsapp((s) => ({ ...s, status: "connected", qr: null }));
+            clearInterval(poll);
+            setLoading((s) => ({ ...s, refresh: false }));
+            return;
+          }
+          const qr = statusRes.data?.session?.qrCode;
+          if (qr) {
+            setWhatsapp((s) => ({ ...s, qr }));
+            clearInterval(poll);
+            setLoading((s) => ({ ...s, refresh: false }));
+          }
+        } catch {}
+      }, 3000);
+      refreshPollRef.current = poll;
+    } catch {
+      setLoading((s) => ({ ...s, refresh: false }));
+    }
   };
 
   const handlePair = async () => {
@@ -159,12 +208,6 @@ const Dashboard = () => {
     } catch {
       setLoading((s) => ({ ...s, pair: false }));
     }
-  };
-
-  const handleStopForwarding = async () => {
-    setStoppingForward(true);
-    try { await api.post("/forwarding/stop"); setForwardingActive(false); } catch {}
-    setStoppingForward(false);
   };
 
   const handleSyncGroups = async () => {
@@ -207,23 +250,23 @@ const Dashboard = () => {
           {whatsapp.phone && <span style={styles.phoneBadge}>{whatsapp.phone}</span>}
         </div>
         <div style={styles.actions}>
-          {forwardingActive && (
-            <button onClick={handleStopForwarding} style={stoppingForward ? { ...styles.btnStop, ...styles.btnDisabled } : styles.btnStop} disabled={stoppingForward}>
-              {stoppingForward ? <><span style={{ ...styles.spinner, borderTopColor: "#fff" }} /> Arrêt...</> : <><i className="bi bi-stop-fill" style={{ marginRight: 6 }}></i>Arrêter le transfert</>}
-            </button>
-          )}
           <button onClick={handleSyncGroups} style={syncing ? { ...styles.btnSync, ...styles.btnDisabled } : styles.btnSync} disabled={syncing}>
             {syncing ? <><span style={styles.spinner} /> Sync...</> : <><i className="bi bi-arrow-clockwise" style={{ marginRight: 6 }}></i>Synchroniser</>}
           </button>
           {whatsapp.status !== "connected" && (
-            <button onClick={handleConnect} style={loading.connect ? { ...styles.btnConnect, ...styles.btnDisabled } : styles.btnConnect} disabled={loading.connect}>
-              {loading.connect ? <><span style={styles.spinner} /> Connexion...</> : <><i className="bi bi-qr-code-scan" style={{ marginRight: 6 }}></i>Scanner QR</>}
+            <button onClick={handleConnect} style={loading.connect ? { ...styles.btnStart, ...styles.btnDisabled } : styles.btnStart} disabled={loading.connect}>
+              {loading.connect ? <><span style={styles.spinner} /> Démarrage...</> : <><i className="bi bi-play-fill" style={{ marginRight: 6 }}></i>Démarrer le serveur</>}
             </button>
           )}
           {whatsapp.status === "connected" && (
-            <button onClick={handleDisconnect} style={loading.disconnect ? { ...styles.btnDisconnect, ...styles.btnDisabled } : styles.btnDisconnect} disabled={loading.disconnect}>
-              {loading.disconnect ? <><span style={styles.spinner} /> Déconnexion...</> : <><i className="bi bi-power" style={{ marginRight: 6 }}></i>Déconnecter</>}
-            </button>
+            <>
+              <button onClick={handleFreshConnect} style={loading.refresh ? { ...styles.btnRefresh, ...styles.btnDisabled } : styles.btnRefresh} disabled={loading.refresh}>
+                {loading.refresh ? <><span style={styles.spinner} /> Scan...</> : <><i className="bi bi-qr-code-scan" style={{ marginRight: 6 }}></i>Scan nouveau QR</>}
+              </button>
+              <button onClick={handleDisconnect} style={loading.disconnect ? { ...styles.btnDisconnect, ...styles.btnDisabled } : styles.btnDisconnect} disabled={loading.disconnect}>
+                {loading.disconnect ? <><span style={styles.spinner} /> Déconnexion...</> : <><i className="bi bi-power" style={{ marginRight: 6 }}></i>Déconnecter</>}
+              </button>
+            </>
           )}
         </div>
       </div>
@@ -282,44 +325,10 @@ const Dashboard = () => {
         <StatusCard icon="bi bi-person-fill" label="Membres totaux" value={stats.members} color="#128c7e" />
         <StatusCard icon="bi bi-people" label="Utilisateurs du bot" value={stats.users} color="#5f4b8b" />
         <StatusCard icon="bi bi-send-check-fill" label="Diffusions relayées" value={stats.broadcastSent} color="#34b7f1" />
-        <StatusCard icon="bi bi-shield-fill-check" label="Statut Sécurité" value="Actif" color="#ffc107" />
+        <StatusCard icon="bi bi-telephone-x-fill" label="Rejeter les appels" value={autoRejectCalls ? "Activé" : "Désactivé"} color={autoRejectCalls ? "#dc3545" : "#8696a0"} onClick={handleToggleCalls} style={{ cursor: "pointer" }} />
       </div>
 
       <div style={styles.mainGrid(isMobile)}>
-        <div style={styles.sectionCard}>
-          <h3 style={styles.sectionTitle}>
-            <i className="bi bi-arrow-left-right" style={{ marginRight: 8, color: "#00a884" }}></i>Activité en temps réel
-          </h3>
-          <div style={styles.activityList}>
-            {forwardActivity.length === 0 && (
-              <div style={styles.emptyContainer}>
-                <i className="bi bi-inbox" style={styles.emptyIcon}></i>
-                <p style={styles.empty}>Aucun message relayé pour le moment</p>
-              </div>
-            )}
-            {forwardActivity.map((a) => (
-              <div key={a._id} style={styles.activityItem}>
-                <span style={{ ...styles.activityBadge, backgroundColor: a.masterGroup ? "#fff9db" : "#f0f2f5" }}>
-                  <i className={`bi ${a.masterGroup ? "bi-trophy-fill" : "bi-arrow-left-right"}`} style={{ color: a.masterGroup ? "#ffc107" : "#8696a0" }}></i>
-                </span>
-                  <div style={styles.activityContent}>
-                    <div style={styles.activityTop}>
-                      <strong style={styles.activityRule}>{a.ruleName}</strong>
-                      <span style={styles.activityTime}>{a.time ? new Date(a.time).toLocaleTimeString("fr-FR") : ""}</span>
-                    </div>
-                    <span style={styles.activityMsg}>
-                      {a.mediaLabel && <span style={{ marginRight: 6, fontWeight: 600 }}>{a.mediaLabel}</span>}
-                      {a.message ? `"${a.message.length > 50 ? a.message.substring(0, 50) + "..." : a.message}"` : ""}
-                    </span>
-                    <span style={styles.activityMeta}>
-                      Expéditeur : <strong>@{a.sender}</strong> &rarr; Partagé avec <strong>{a.targets ?? 0} groupe{(a.targets ?? 0) > 1 ? "s" : ""}</strong>
-                    </span>
-                  </div>
-              </div>
-            ))}
-          </div>
-        </div>
-
         <div style={styles.sectionCard}>
           <h3 style={styles.sectionTitle}>
             <i className="bi bi-terminal-fill" style={{ marginRight: 8, color: "#ffc107" }}></i>Journaux d'événements
@@ -387,7 +396,7 @@ const styles = {
     borderRadius: 6,
     fontWeight: 600
   },
-  actions: { display: "flex", gap: 8, flexWrap: "wrap" },
+actions: { display: "flex", gap: 8, flexWrap: "wrap" },
   btnConnect: { 
     padding: "10px 20px", 
     backgroundColor: "#00a884", 
@@ -432,6 +441,18 @@ const styles = {
     fontWeight: 600, 
     cursor: "pointer",
     transition: "background 0.2s"
+  },
+  btnRefresh: { 
+    padding: "10px 20px", 
+    backgroundColor: "#5f4b8b", 
+    color: "#fff", 
+    border: "none", 
+    borderRadius: 8, 
+    fontSize: 13, 
+    fontWeight: 600, 
+    cursor: "pointer",
+    transition: "background 0.2s",
+    boxShadow: "0 2px 8px rgba(95,75,139,0.3)"
   },
   qrBox: (isMobile) => ({ 
     backgroundColor: "#fff", 
@@ -522,7 +543,7 @@ const styles = {
   grid: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 16 },
   mainGrid: (isMobile) => ({
     display: "grid",
-    gridTemplateColumns: isMobile ? "1fr" : "1.2fr 0.8fr",
+    gridTemplateColumns: "1fr",
     gap: 20
   }),
   sectionCard: { 
@@ -536,53 +557,6 @@ const styles = {
     gap: 14
   },
   sectionTitle: { fontSize: 16, fontWeight: 700, color: "#111b21", margin: 0 },
-  activityList: { 
-    display: "flex", 
-    flexDirection: "column", 
-    gap: 12, 
-    maxHeight: 400, 
-    overflowY: "auto",
-    paddingRight: 6
-  },
-  activityItem: { 
-    display: "flex", 
-    alignItems: "flex-start", 
-    gap: 12, 
-    padding: 12, 
-    borderRadius: 8,
-    border: "1px solid #f0f2f5",
-    backgroundColor: "#f8f9fa"
-  },
-  activityBadge: { 
-    fontSize: 16, 
-    width: 36, 
-    height: 36, 
-    borderRadius: "50%", 
-    display: "flex", 
-    alignItems: "center", 
-    justifyContent: "center",
-    flexShrink: 0
-  },
-  activityContent: { 
-    flex: 1, 
-    display: "flex", 
-    flexDirection: "column", 
-    gap: 4 
-  },
-  activityTop: {
-    display: "flex",
-    justifyContent: "space-between",
-    alignItems: "center"
-  },
-  activityRule: { fontSize: 13, color: "#00a884" },
-  activityMsg: { 
-    color: "#111b21", 
-    fontSize: 13,
-    fontStyle: "italic",
-    lineHeight: 1.4
-  },
-  activityMeta: { fontSize: 11, color: "#8696a0" },
-  activityTime: { fontSize: 11, color: "#8696a0" },
   logList: { 
     display: "flex", 
     flexDirection: "column", 

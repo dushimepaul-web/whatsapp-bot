@@ -12,6 +12,7 @@ const groupSchema = new mongoose.Schema({
   isRestricted: { type: Boolean, default: false },
   botIsAdmin: { type: Boolean, default: false },
   lastSync: { type: Date },
+  category: { type: String, default: "", enum: ["", "general", "clients", "partners", "staff", "test", "archive"] },
 }, { timestamps: true });
 
 groupSchema.index({ groupId: 1, userId: 1 }, { unique: true });

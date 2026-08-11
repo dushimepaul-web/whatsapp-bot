@@ -32,7 +32,7 @@ const Register = () => {
       {error && <div style={styles.error}>{error}</div>}
       <input style={styles.input} type="text" placeholder="Nom" value={name} onChange={(e) => setName(e.target.value)} required />
       <input style={styles.input} type="email" placeholder="Email" value={email} onChange={(e) => setEmail(e.target.value)} required />
-      <input style={styles.input} type="password" placeholder="Mot de passe (8+ caractères)" value={password} onChange={(e) => setPassword(e.target.value)} required minLength={8} />
+      <input style={styles.input} type="password" placeholder="Mot de passe (6+ caractères)" value={password} onChange={(e) => setPassword(e.target.value)} required minLength={6} />
       <button style={styles.btn} type="submit" disabled={loading}>{loading ? "Inscription..." : "S'inscrire"}</button>
       <p style={styles.text}>Déjà un compte ? <Link to="/login" style={styles.link}>Se connecter</Link></p>
     </form>

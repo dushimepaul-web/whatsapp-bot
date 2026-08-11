@@ -9,25 +9,12 @@
 ## Règles de fonctionnement
 1. Ne JAMAIS redémarrer le conteneur inutilement (risque d'expiration session WhatsApp)
 2. Si session expirée → aller sur http://localhost:9016 → scanner le QR code
-3. Settings à ne PAS modifier dans l'UI :
-   - `commandGroupName` = `CONTENT PREPARATION`
-   - `masterGroupKeyword` = `GROUPES`
-   - `inboxKeyword` = `INBOX`
-   - `forwardingKeyword` = `NUFOTEC`
-   - `autoRejectCalls` = `false`
-4. Pour vérifier l'état : `/forwarding` dans CONTENT PREPARATION
-5. En cas de problème : `docker logs whatsapp-backend`
-
-## Règles de forwarding actives (2)
-| Règle | Source | Cible | Type |
-|---|---|---|---|
-| MASTER GROUPES → NUFOTEC | Nº1.MASTER GROUPES | 223 groupes NUFOTEC | Groupe→Groupes |
-| Nº2.MASTER INBOX → TOUS LES MEMBRES | Nº2.MASTER INBOX | 37534 membres NUFOTEC | Groupe→Membres |
+3. En cas de problème : `docker logs whatsapp-backend`
 
 ## Modération
-- 223 groupes NUFOTEC = `isRestricted=true`
-- Médias et liens supprimés automatiquement pour les non-admins
-- Avertissement envoyé avec @mention
+- 223 groupes NUFOTEC = `isRestricted=true` (auto-détecté si le nom contient "nufotec" / "alimentation")
+- Règle stricte : dans tout groupe `isRestricted=true` où le bot est admin, les membres ne peuvent envoyer QUE du texte original — transférés, médias et liens = suppression + avertissement @mention (les admins sont exemptés)
+- Si le bot n'est pas admin du groupe → modération désactivée (pas de tentative de suppression)
 
 ## Commandes (dans CONTENT PREPARATION uniquement)
 | Commande | Effet |
@@ -35,21 +22,16 @@
 | `/help` | Liste des commandes |
 | `/ping` | Test connexion |
 | `/groupes` | Stats des groupes |
-| `/forwarding` | État des règles + cibles exactes |
-| `/broadcast <message>` | Diffusion vers tous les groupes NUFOTEC |
-| `/list [page]` | Liste paginée des 223 groupes |
-| `/stop` | Arrêt définitif du forwarding |
-| `/resume` | Reprise du forwarding |
-| `/stats` | Statistiques globales |
+| `/broadcast <message>` | Diffusion vers tous les groupes visibles |
 | `/logs` | Dernières actions |
+| `/scan` | Détecte les groupes NUFOTEC à lier à la communauté |
 
 ## Fichiers critiques
-- `backend/whatsapp/broadcastManager.js` — Logique de forwarding (handleIncoming, batch, queue)
 - `backend/whatsapp/moderation.js` — Suppression médias/liens dans groupes restreints
-- `backend/whatsapp/commands.js` — Commandes WhatsApp (/forwarding, /stop, etc.)
-- `backend/services/defaultConfig.js` — Config appliquée à la connexion ($setOnInsert)
+- `backend/whatsapp/commands.js` — Commandes WhatsApp (/help, /ping, /broadcast, ...)
 - `backend/services/whatsappService.js` — Connexion WhatsApp, keepalive 15s, reconnexion auto
 - `backend/config/index.js` — CORS (localhost + IP), JWT
+- `backend/controllers/settingsController.js` — Paramètres (rate limit, modération, auto-réponses)
 - `frontend/src/context/SocketContext.js` — Socket.IO avec WebSocket + polling
 
 ## Architecture
@@ -63,9 +45,6 @@ Backend → WhatsApp (Baileys WebSocket)
 
 ## Notes techniques
 - Le bot utilise `@whiskeysockets/baileys` v7.0.0-rc13
-- Les settings sont protégés par `$setOnInsert` — jamais écrasés après création
 - Keepalive WebSocket toutes les 15s
 - Reconnexion automatique après toute déconnexion (y compris loggedOut)
-- Forwarding persistant en BDD (PendingForward) avant envoi — crash proof
-- Rate limit: 30 msg/min, 1s délai, 5000/jour
-- `onlyAdmins: false` sur les 2 règles — tout membre peut déclencher le forwarding
+- Forwarding supprimé du codebase (oct. 2026) : plus de règles ni de file de transfert — les collections MongoDB `forwardingrules`, `forwardedmessages`, `pendingforwards` sont orphelines (à supprimer dans la BDD)

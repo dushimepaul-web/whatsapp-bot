@@ -41,18 +41,6 @@ const schemas = {
     toAllMembers: z.boolean().optional().default(false),
   }),
 
-  forwardingRule: z.object({
-    name: z.string().min(1, "Le nom de la règle est requis"),
-    sourceGroupId: z.string().min(1, "Le groupe source est requis"),
-    targetGroupIds: z.array(z.string()).optional().default([]),
-    forwardToAllGroups: z.boolean().optional().default(false),
-    forwardToMembers: z.boolean().optional().default(false),
-    onlyAdmins: z.boolean().optional().default(false),
-    masterGroup: z.boolean().optional().default(false),
-    includeMedia: z.boolean().optional().default(true),
-    targetGroupPattern: z.string().optional().default(""),
-  }),
-
   message: z.object({
     jid: z.string().min(1, "Le destinataire est requis"),
     message: z.string().min(1, "Le message est requis"),
@@ -65,8 +53,6 @@ const schemas = {
     moderationEnabled: z.boolean().optional(),
     autoRestrictKeyword: z.string().optional(),
     welcomeMessage: z.string().optional(),
-    masterGroupKeyword: z.string().optional(),
-    forwardingKeyword: z.string().optional(),
     rateLimitMessagesPerMinute: z.number().int().min(1).max(300).optional(),
     rateLimitDelayBetween: z.number().int().min(100).max(10000).optional(),
     rateLimitDailyLimit: z.number().int().min(10).max(100000).optional(),

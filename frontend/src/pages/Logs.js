@@ -10,17 +10,15 @@ const Logs = () => {
   const [page, setPage] = useState(1);
   const [total, setTotal] = useState(0);
   const [pages, setPages] = useState(0);
-  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    setLoading(true);
     const params = { limit: 50, page };
     if (filter) params.type = filter;
     api.get("/logs", { params }).then(({ data }) => {
       setLogs(data.logs);
       setTotal(data.total);
       setPages(data.pages);
-    }).catch(() => {}).finally(() => setLoading(false));
+    }).catch(() => {});
   }, [filter, page]);
 
   const typeColors = { info: "#667781", warn: "#ffc107", error: "#ef5350", moderation: "#075e54", broadcast: "#25d366", message: "#128c7e", system: "#8696a0" };
@@ -41,8 +39,6 @@ const Logs = () => {
         </select>
         <span style={styles.count}><i className="bi bi-journal-text" style={{ marginRight: 6 }}></i>{total} entrées</span>
       </div>
-      {loading && <div style={styles.loading}><span style={styles.spinner} /> Chargement...</div>}
-      {!loading && logs.length === 0 && <div style={styles.empty}>Aucun log trouvé</div>}
       <div style={styles.list}>
         {logs.map((log) => (
           <div key={log._id} style={styles.item(isMobile)}>
@@ -80,8 +76,6 @@ const styles = {
   pagination: (isMobile) => ({ display: "flex", alignItems: "center", justifyContent: "center", gap: 16, marginTop: 16, flexWrap: "wrap" }),
   pageBtn: { padding: "8px 16px", backgroundColor: "#075e54", color: "#fff", border: "none", borderRadius: 6, fontSize: 13, cursor: "pointer", display: "flex", alignItems: "center" },
   pageInfo: { fontSize: 13, color: "#667781" },
-  loading: { display: "flex", justifyContent: "center", alignItems: "center", padding: 40, color: "#8696a0", fontSize: 14, gap: 8 },
-  spinner: { display: "inline-block", width: 16, height: 16, border: "2px solid #e0e0e0", borderTopColor: "#075e54", borderRadius: "50%", animation: "spin 0.6s linear infinite" },
 };
 
 export default Logs;

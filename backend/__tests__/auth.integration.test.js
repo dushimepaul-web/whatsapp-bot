@@ -9,7 +9,6 @@ jest.mock("../middlewares/rateLimiter", () => ({
   connectLimiter: (req, res, next) => next(),
   broadcastLimiter: (req, res, next) => next(),
   groupSyncLimiter: (req, res, next) => next(),
-  forwardingLimiter: (req, res, next) => next(),
 }));
 
 const request = require("supertest");

@@ -19,9 +19,11 @@ refreshSecret: process.env.JWT_REFRESH_SECRET || (() => { throw new Error("JWT_R
   cors: {
     origin: (() => {
       const origins = process.env.CORS_ORIGIN ? process.env.CORS_ORIGIN.split(",").map(o => o.trim()) : [];
-      const localOrigins = ["http://localhost:3000", "http://127.0.0.1:3000", "http://[::1]:3000",
-                            "http://localhost:9016", "http://127.0.0.1:9016"];
-      return Array.from(new Set([...origins, ...localOrigins]));
+      if (process.env.NODE_ENV !== "production") {
+        const devOrigins = ["http://localhost:3000", "http://127.0.0.1:3000", "http://[::1]:3000"];
+        return Array.from(new Set([...origins, ...devOrigins]));
+      }
+      return origins.length === 1 ? origins[0] : origins;
     })(),
   },
   env: process.env.NODE_ENV || "development",

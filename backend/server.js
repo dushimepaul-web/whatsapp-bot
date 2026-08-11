@@ -12,9 +12,7 @@ const { apiLimiter } = require("./middlewares/rateLimiter");
 const { setupSocket } = require("./sockets");
 const logger = require("./utils/logger");
 const WhatsappSession = require("./models/WhatsappSession");
-const ForwardingRule = require("./models/ForwardingRule");
 const whatsappService = require("./services/whatsappService");
-const broadcastManager = require("./whatsapp/broadcastManager");
 
 const app = express();
 app.set("trust proxy", 1);
@@ -33,7 +31,6 @@ app.get("/api/health", (req, res) => {
 app.use("/api/auth", require("./routes/auth"));
 app.use("/api/whatsapp", require("./routes/whatsapp"));
 app.use("/api/groups", require("./routes/groups"));
-app.use("/api/forwarding", require("./routes/forwarding"));
 app.use("/api/broadcast", require("./routes/broadcast"));
 app.use("/api/members", require("./routes/members"));
 app.use("/api/settings", require("./routes/settings"));
@@ -90,34 +87,11 @@ const start = async () => {
 
   setTimeout(restoreSessions, 2000);
 
-  // Fournir le provider de socket au BroadcastManager
-  broadcastManager.setSockProvider(async (userId) => whatsappService.getSocket(userId));
-
-  // Restauration des forwards en attente après reconnexion
-  setTimeout(async () => {
-    await broadcastManager.restorePending(
-      async (userId) => whatsappService.getSocket(userId)
-    );
-  }, 6000);
-
-  // Nettoyage règle en double
-  setTimeout(async () => {
-    try {
-      const deleted = await ForwardingRule.deleteOne({ name: "Master vers NUFOTEC", isActive: false });
-      if (deleted.deletedCount > 0) logger.info("Ancienne règle inactive supprimée");
-    } catch (e) { logger.error("Erreur nettoyage règle:", e); }
-  }, 3000);
-
   // Sync auto des groupes toutes les 30 minutes
   setInterval(async () => {
     const count = await whatsappService.syncAllGroups();
     if (count > 0) logger.info(`Sync auto terminée pour ${count} session(s)`);
   }, 30 * 60 * 1000);
-
-  setInterval(() => {
-    broadcastManager.cleanMediaCache();
-    logger.info("Nettoyage automatique du cache média effectué");
-  }, 24 * 60 * 60 * 1000);
 };
 
 start().catch(e => {
@@ -131,22 +105,7 @@ process.on("SIGINT", shutdown);
 async function shutdown() {
   logger.info("Arrêt gracieux...");
   try {
-    // Persister les messages mémoire restants dans PendingForward
-    const persisted = await broadcastManager.flushQueueToDB();
-    if (persisted > 0) {
-      logger.info(`${persisted} message(s) persistés en base avant arrêt`);
-    }
-
-    // Attendre la fin de la file d'attente (max 60s)
-    const pending = broadcastManager.pendingCount();
-    if (pending > 0) {
-      logger.info(`Attente de ${pending} message(s) en cours d'envoi...`);
-      for (let i = 0; i < 60; i++) {
-        if (broadcastManager.pendingCount() === 0) break;
-        await new Promise((r) => setTimeout(r, 1000));
-      }
-    }
-    server.close();
+    await new Promise((resolve) => server.close(resolve));
     await whatsappService.disconnectAll();
     await mongoose.disconnect();
   } catch (err) {

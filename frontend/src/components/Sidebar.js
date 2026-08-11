@@ -22,7 +22,6 @@ const Sidebar = () => {
     { to: "/groups", label: "Groupes", icon: "bi bi-people-fill" },
     { to: "/members", label: "Membres", icon: "bi bi-person-circle" },
     { to: "/broadcast", label: "Broadcast", icon: "bi bi-send-fill" },
-    { to: "/forwarding", label: "Diffusion", icon: "bi bi-arrow-left-right" },
     { to: "/logs", label: "Logs", icon: "bi bi-journal-text" },
     ...(consoleAllowed ? [{ to: "/console", label: "Console", icon: "bi bi-terminal-fill" }] : []),
     { to: "/settings", label: "Paramètres", icon: "bi bi-gear-wide-connected" },

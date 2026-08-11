@@ -30,7 +30,6 @@ exports.stats = async (req, res) => {
     ]);
     res.json({ stats });
   } catch (err) {
-    logger.error("Erreur stats logs:", err);
     res.status(500).json({ error: "Erreur serveur" });
   }
 };
@@ -40,7 +39,6 @@ exports.deleteAll = async (req, res) => {
     await Log.deleteMany({ userId: req.user._id });
     res.json({ message: "Logs supprimés" });
   } catch (err) {
-    logger.error("Erreur delete logs:", err);
     res.status(500).json({ error: "Erreur serveur" });
   }
 };

@@ -70,21 +70,6 @@ describe("Validation schemas - broadcast", () => {
   });
 });
 
-describe("Validation schemas - forwardingRule", () => {
-  test("valide une règle complète", () => {
-    const result = schemas.forwardingRule.parse({ name: "Ma règle", sourceGroupId: "abc@g.us" });
-    expect(result.name).toBe("Ma règle");
-  });
-
-  test("rejette nom manquant", () => {
-    expect(() => schemas.forwardingRule.parse({ sourceGroupId: "abc@g.us" })).toThrow();
-  });
-
-  test("rejette source manquante", () => {
-    expect(() => schemas.forwardingRule.parse({ name: "Règle" })).toThrow();
-  });
-});
-
 describe("Validation schemas - webhookSend", () => {
   test("valide un envoi text", () => {
     const result = schemas.webhookSend.parse({ to: "33612345678@s.whatsapp.net", text: "Hello" });

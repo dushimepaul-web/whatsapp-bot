@@ -3,7 +3,6 @@ const jwt = require("jsonwebtoken");
 const config = require("../config");
 const User = require("../models/User");
 const whatsappService = require("../services/whatsappService");
-const broadcastManager = require("../whatsapp/broadcastManager");
 const logHub = require("../utils/logHub");
 const logger = require("../utils/logger");
 
@@ -11,19 +10,35 @@ let io = null;
 
 const setupSocket = (server) => {
   io = new Server(server, {
-    cors: { origin: config.cors.origin, methods: ["GET", "POST"] },
+    path: "/api/socket.io",
+    cors: {
+      origin: config.cors.origin,
+      methods: ["GET", "POST"],
+      credentials: true,
+    },
+    transports: ["polling", "websocket"],
   });
 
   io.use(async (socket, next) => {
     try {
       const token = socket.handshake.auth.token;
-      if (!token) return next(new Error("Token manquant"));
+      const origin = socket.handshake.headers?.origin || "inconnu";
+      if (!token) {
+        logger.warn(`Socket auth échouée: token manquant (origin=${origin}, id=${socket.id})`);
+        return next(new Error("Token manquant"));
+      }
       const decoded = jwt.verify(token, config.jwt.secret);
       const user = await User.findById(decoded.id);
-      if (!user) return next(new Error("Utilisateur introuvable"));
+      if (!user) {
+        logger.warn(`Socket auth échouée: utilisateur introuvable (id=${decoded.id})`);
+        return next(new Error("Utilisateur introuvable"));
+      }
       socket.user = user;
+      logger.info(`Socket auth réussie: ${user.email} (origin=${origin})`);
       next();
-    } catch {
+    } catch (err) {
+      const origin = socket.handshake.headers?.origin || "inconnu";
+      logger.warn(`Socket auth échouée: token invalide (origin=${origin}, erreur=${err.message})`);
       next(new Error("Token invalide"));
     }
   });
@@ -46,9 +61,13 @@ const setupSocket = (server) => {
       emitToUser(userId, "whatsapp:pairingCode", { code });
     });
 
-    socket.on("disconnect", () => {
-      logger.info(`Socket déconnecté: ${socket.user.email}`);
+    socket.on("disconnect", (reason) => {
+      logger.info(`Socket déconnecté: ${socket.user.email} (raison: ${reason})`);
     });
+  });
+
+  io.engine.on("connection_error", (err) => {
+    logger.warn(`Socket.IO connection_error: ${err.message} (code=${err.code}, req=${err.req?.url})`);
   });
 
   logHub.on("log", (data) => {
@@ -56,8 +75,6 @@ const setupSocket = (server) => {
       io.emit("log:new", data);
     }
   });
-
-  broadcastManager.setIO(io, emitToUser);
 
   return io;
 };

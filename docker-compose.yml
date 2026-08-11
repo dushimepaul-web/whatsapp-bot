@@ -11,13 +11,6 @@ services:
       - mongodb_data:/data/db
     environment:
       MONGO_INITDB_DATABASE: whatsapp-bot
-      MONGO_INITDB_ROOT_USERNAME: ${MONGO_USER:-whatsapp}
-      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD:-changeme_in_production}
-    healthcheck:
-      test: echo 'db.runCommand("ping").ok' | mongosh --quiet
-      interval: 10s
-      retries: 5
-      start_period: 20s
 
   backend:
     build:
@@ -28,24 +21,18 @@ services:
     ports:
       - "9013:3001"
     depends_on:
-      mongodb:
-        condition: service_healthy
+      - mongodb
     environment:
       NODE_ENV: production
       PORT: 3001
-      MONGODB_URI: ${MONGODB_URI:-mongodb://whatsapp:changeme_in_production@mongodb:27017/whatsapp-bot?authSource=admin}
-      JWT_SECRET: "${JWT_SECRET:?JWT_SECRET manquant}"
-      JWT_REFRESH_SECRET: "${JWT_REFRESH_SECRET:?JWT_REFRESH_SECRET manquant}"
+      MONGODB_URI: mongodb://mongodb:27017/whatsapp-bot
+      JWT_SECRET: "${JWT_SECRET:?JWT_SECRET manquant — lance d'abord: backend/scripts/init-env.sh}"
+      JWT_REFRESH_SECRET: "${JWT_REFRESH_SECRET:?JWT_REFRESH_SECRET manquant — lance d'abord: backend/scripts/init-env.sh}"
       CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:3000}
       CONSOLE_ALLOWED_PHONES: ${CONSOLE_ALLOWED_PHONES:-25768863945,25779666439}
     volumes:
       - auth_info:/app/auth_info
       - backend_logs:/app/logs
-    healthcheck:
-      test: wget --no-verbose --tries=1 --spider http://localhost:3001/api/health || exit 1
-      interval: 30s
-      retries: 3
-      start_period: 30s
 
   frontend:
     build:

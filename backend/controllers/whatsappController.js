@@ -6,7 +6,7 @@ exports.getStatus = async (req, res) => {
   try {
     const userId = req.user._id;
     const status = await whatsappService.getStatus(userId);
-    const session = await whatsappService.getSessionDoc(userId);
+    const session = await whatsappService._getSessionDoc(userId);
     res.json({ ...status, session });
   } catch (err) {
     logger.error({ err: err.message || err, stack: err.stack }, "Erreur statut");
@@ -18,11 +18,15 @@ exports.connect = async (req, res) => {
   try {
     const userId = req.user._id;
 
+    if (whatsappService.isConnecting(userId)) {
+      return res.status(409).json({ error: "Connexion déjà en cours" });
+    }
+
     if (whatsappService.getSocket(userId)) {
       await whatsappService.disconnect(userId);
     }
 
-    let session = await whatsappService.getSessionDoc(userId);
+    let session = await whatsappService._getSessionDoc(userId);
     if (!session) {
       session = await WhatsappSession.create({ userId });
     }
@@ -31,8 +35,8 @@ exports.connect = async (req, res) => {
     session.qrCode = null;
     await session.save();
 
-    const fresh = req.query.fresh !== "false";
-    whatsappService.connect(userId, fresh).catch((err) => {
+    const fresh = req.query.fresh === "true";
+    whatsappService.connect(userId, fresh, null, true).catch((err) => {
       logger.error({ err: err.message || err }, `Erreur connexion WhatsApp user=${userId}`);
     });
 
@@ -57,7 +61,7 @@ exports.disconnect = async (req, res) => {
 exports.getQr = async (req, res) => {
   try {
     const userId = req.user._id;
-    const session = await whatsappService.getSessionDoc(userId);
+    const session = await whatsappService._getSessionDoc(userId);
     res.json({ qr: session?.qrCode || null });
   } catch (err) {
     logger.error("Erreur getQr:", err);
@@ -78,7 +82,7 @@ exports.pair = async (req, res) => {
       await whatsappService.disconnect(userId);
     }
 
-    let session = await whatsappService.getSessionDoc(userId);
+    let session = await whatsappService._getSessionDoc(userId);
     if (!session) {
       session = await WhatsappSession.create({ userId });
     }

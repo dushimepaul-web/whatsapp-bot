@@ -14,13 +14,9 @@ const settingSchema = new mongoose.Schema({
   rateLimitDelayBetween: { type: Number, default: 1000 },
   rateLimitDailyLimit: { type: Number, default: 5000 },
   moderationEnabled: { type: Boolean, default: true },
+  commandAllowedGroups: [{ type: String }],
   autoRejectCalls: { type: Boolean, default: true },
   welcomeMessage: { type: String, default: "Bienvenue dans le groupe !" },
-  forwardingKeyword: { type: String, default: "NUFOTEC" },
-  masterGroupKeyword: { type: String, default: "" },
-  inboxKeyword: { type: String, default: "" },
-  autoRestrictKeyword: { type: String, default: "nufotec" },
-  commandGroupName: { type: String, default: "preparation group" },
   autoReplies: { type: [autoReplySchema], default: [] },
   telegramToken: { type: String, default: "" },
   telegramChatId: { type: String, default: "" },
@@ -29,6 +25,9 @@ const settingSchema = new mongoose.Schema({
   notifyOnNewUser: { type: Boolean, default: false },
   webhookUrl: { type: String, default: "" },
   webhookApiKey: { type: String, default: "" },
+  forbiddenMessageTypes: [{ type: String }],
+  blockLinks: { type: Boolean, default: true },
+  blockForwarded: { type: Boolean, default: false },
 }, { timestamps: true });
 
 module.exports = mongoose.model("Setting", settingSchema);

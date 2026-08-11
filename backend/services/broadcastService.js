@@ -6,9 +6,14 @@ const whatsappService = require("./whatsappService");
 const logger = require("../utils/logger");
 const { sleep } = require("../utils/helpers");
 
-var urlValidator = require("../utils/urlValidator");
-var isValidUrl = urlValidator.isValidUrl;
-var isPrivateIP = urlValidator.isPrivateIP;
+const isValidUrl = (str) => {
+  try {
+    const u = new URL(str);
+    return u.protocol === "http:" || u.protocol === "https:";
+  } catch {
+    return false;
+  }
+};
 
 class BroadcastService {
   async sendBroadcast(broadcastId, userId) {
@@ -18,7 +23,6 @@ class BroadcastService {
     broadcast.status = "sending";
     broadcast.sentCount = 0;
     broadcast.failedCount = 0;
-    broadcast.startedAt = new Date();
     await broadcast.save();
 
     const sock = whatsappService.getSocket(userId);
@@ -28,36 +32,8 @@ class BroadcastService {
     const delayMs = settings?.rateLimitDelayBetween || 1000;
     const dailyLimit = settings?.rateLimitDailyLimit || 5000;
 
-    // Timeout de sécurité : si le broadcast dure plus de 2h, on le force en "completed"
-    const heartbeat = setInterval(async () => {
-      try {
-        const b = await Broadcast.findById(broadcastId);
-        if (b && b.status === "sending") {
-          b.sentCount = sentCount;
-          b.failedCount = failedCount;
-          await b.save();
-        }
-      } catch (e) {
-        logger.error(`Erreur heartbeat broadcast ${broadcastId}: ${e.message}`);
-      }
-    }, 30000);
-
-    const safetyTimeout = setTimeout(async () => {
-      try {
-        const b = await Broadcast.findById(broadcastId);
-        if (b && b.status === "sending") {
-          b.status = "completed";
-          b.sentCount = sentCount;
-          b.failedCount = failedCount;
-          await b.save();
-          logger.warn(`Broadcast ${broadcastId} forcé à "completed" (timeout 2h)`);
-        }
-      } catch (e) {
-        logger.error(`Erreur safetyTimeout broadcast ${broadcastId}: ${e.message}`);
-      }
-    }, 2 * 60 * 60 * 1000);
-
     let targets = [];
+
     if (broadcast.toAllGroups) {
       const groups = await Group.find({ userId });
       targets = groups.map((g) => ({ type: "group", id: g.groupId }));
@@ -113,11 +89,11 @@ class BroadcastService {
         const jitter = 1000 + Math.random() * 2000;
         await sleep(delayMs + jitter);
       } catch (err) {
-        logger.error(`Erreur envoi broadcast vers ${id}: ${err.message}`);
+        logger.error(`Erreur envoi broadcast vers ${id}: ${err}`);
         failedCount++;
       }
 
-      if ((i + 1) % 5 === 0) {
+      if ((i + 1) % 10 === 0) {
         broadcast.sentCount = sentCount;
         broadcast.failedCount = failedCount;
         await broadcast.save();
@@ -128,9 +104,6 @@ class BroadcastService {
     broadcast.failedCount = failedCount;
     broadcast.status = "completed";
     await broadcast.save();
-
-    clearInterval(heartbeat);
-    clearTimeout(safetyTimeout);
 
     await logger.db({
       userId,
