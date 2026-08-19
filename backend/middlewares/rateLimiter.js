@@ -11,8 +11,14 @@ const apiLimiter = rateLimit({
 
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 100,
+  max: 20,
   message: { error: "Trop de tentatives de connexion" },
 });
 
-module.exports = { apiLimiter, authLimiter };
+const registerLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 5,
+  message: { error: "Trop de comptes créés, réessayez plus tard" },
+});
+
+module.exports = { apiLimiter, authLimiter, registerLimiter };

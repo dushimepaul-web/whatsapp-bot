@@ -1,6 +1,7 @@
 const Group = require("../models/Group");
 const Member = require("../models/Member");
 const logger = require("../utils/logger");
+const { escapeRegex } = require("../utils/helpers");
 
 class GroupManager {
   async refreshGroups(userId) {
@@ -11,7 +12,7 @@ class GroupManager {
   async getGroups({ page = 1, limit = 50, search, userId } = {}) {
     const query = { userId };
     if (search) {
-      query.name = { $regex: search, $options: "i" };
+      query.name = { $regex: escapeRegex(search), $options: "i" };
     }
     const total = await Group.countDocuments(query);
     const groups = await Group.find(query)
@@ -34,6 +35,8 @@ class GroupManager {
   }
 
   async getGroupAdmins(groupId, userId) {
+    const group = await Group.findOne({ groupId, userId });
+    if (!group) throw new Error("Groupe introuvable");
     return Member.find({ groupId, userId, isAdmin: true }).sort({ name: 1 });
   }
 

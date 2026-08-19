@@ -27,6 +27,7 @@ class WhatsAppService {
     this.RECONNECT_BASE_DELAY = 3000;
     this.RECONNECT_MAX_DELAY = 30000;
     this.RECONNECT_MAX_ATTEMPTS = 15;
+    this.KEEP_ALIVE_INTERVAL = 15000;
   }
 
   _getSession(userId) {
@@ -44,9 +45,29 @@ class WhatsAppService {
         authDir: path.join(this.baseAuthDir, key),
         reconnectCount: 0,
         reconnectTimer: null,
+        keepAliveTimer: null,
       });
     }
     return this.sessions.get(key);
+  }
+
+  _isBotAdmin(sock, admins) {
+    if (!sock || !admins || !admins.length) return false;
+    const identities = new Set();
+    const addJid = (jid) => {
+      if (!jid) return;
+      const user = jid.split(":")[0];
+      identities.add(user);
+      identities.add(user.split("@")[0]);
+    };
+    addJid(sock.user?.id);
+    addJid(sock.authState?.creds?.me?.id);
+    addJid(sock.authState?.creds?.me?.lid);
+    for (const adminJid of admins) {
+      const user = adminJid.split(":")[0];
+      if (identities.has(user) || identities.has(user.split("@")[0])) return true;
+    }
+    return false;
   }
 
   _clearReconnectTimer(session) {
@@ -60,18 +81,13 @@ class WhatsAppService {
     const session = this._getSession(userId);
     this._clearReconnectTimer(session);
 
+    session.reconnectCount++;
     const delay = Math.min(
       this.RECONNECT_BASE_DELAY * Math.pow(2, session.reconnectCount),
       this.RECONNECT_MAX_DELAY
     );
 
-    if (session.reconnectCount >= this.RECONNECT_MAX_ATTEMPTS) {
-      logger.error(`Reconnexion abandonnée pour user=${userId} après ${session.reconnectCount} tentatives`);
-      return;
-    }
-
-    session.reconnectCount++;
-    logger.info(`Reconnexion planifiée pour user=${userId} (tentative ${session.reconnectCount}/${this.RECONNECT_MAX_ATTEMPTS}) dans ${delay}ms`);
+    logger.info(`Reconnexion planifiée pour user=${userId} (tentative ${session.reconnectCount}) dans ${delay}ms`);
 
     session.reconnectTimer = setTimeout(async () => {
       session.reconnectTimer = null;
@@ -81,6 +97,28 @@ class WhatsAppService {
         logger.error(`Échec reconnexion user=${userId}:`, e.message || e)
       );
     }, delay);
+  }
+
+  _startKeepAlive(session) {
+    this._stopKeepAlive(session);
+    const sock = session.sock;
+    if (!sock) return;
+    session.keepAliveTimer = setInterval(() => {
+      try {
+        const wsClient = sock.ws;
+        const raw = wsClient && (wsClient.socket || wsClient);
+        if (raw && typeof raw.ping === "function" && raw.readyState === 1) raw.ping();
+      } catch (e) {
+        logger.warn(`Keepalive user=${session.userId}: ${e.message || e}`);
+      }
+    }, this.KEEP_ALIVE_INTERVAL);
+  }
+
+  _stopKeepAlive(session) {
+    if (session.keepAliveTimer) {
+      clearInterval(session.keepAliveTimer);
+      session.keepAliveTimer = null;
+    }
   }
 
   async _notifyGroupsServerStarted(sock, userId) {
@@ -206,6 +244,7 @@ class WhatsAppService {
           session.isConnecting = false;
           session.isPairing = false;
           session.reconnectCount = 0;
+          this._startKeepAlive(session);
           const phone = sock.user?.id ? sock.user.id.split("@")[0].split(":")[0] : null;
           if (session.statusCallback) session.statusCallback("connected");
 
@@ -242,6 +281,7 @@ class WhatsAppService {
           session.isConnected = false;
           session.isConnecting = false;
           session.isPairing = false;
+          this._stopKeepAlive(session);
           this._clearReconnectTimer(session);
           if (session.statusCallback) session.statusCallback("disconnected");
 
@@ -362,6 +402,7 @@ class WhatsAppService {
 
   async disconnect(userId) {
     const session = this._getSession(userId);
+    this._stopKeepAlive(session);
     this._clearReconnectTimer(session);
     session.isConnecting = false;
     session.isConnected = false;
@@ -399,7 +440,6 @@ class WhatsAppService {
     const session = this._getSession(userId);
     if (!session.sock) return;
     try {
-      const botPhone = session.sock.user?.id ? session.sock.user.id.split("@")[0].split(":")[0] : null;
       const groups = await session.sock.groupFetchAllParticipating();
       const entries = Object.entries(groups);
       const processedGroupIds = [];
@@ -414,8 +454,7 @@ class WhatsAppService {
           processedGroupIds.push(id);
           const metadata = g;
           const admins = (metadata.participants || []).filter((p) => p.admin).map((p) => p.id);
-const adminPhones = admins.map(a => a.split("@")[0].split(":")[0]);
-          const botIsAdmin = botPhone ? adminPhones.includes(botPhone) : false;
+          const botIsAdmin = this._isBotAdmin(session.sock, admins);
           const updateData = {
             userId,
             name: metadata.subject,
@@ -485,11 +524,9 @@ const adminPhones = admins.map(a => a.split("@")[0].split(":")[0]);
     const session = this._getSession(userId);
     if (!session.sock) return null;
     try {
-      const botPhone = session.sock.user?.id ? session.sock.user.id.split("@")[0].split(":")[0] : null;
       const metadata = await session.sock.groupMetadata(groupId);
       const admins = (metadata.participants || []).filter((p) => p.admin).map((p) => p.id);
-      const adminPhones = admins.map(a => a.split("@")[0].split(":")[0]);
-      const botIsAdmin = botPhone ? adminPhones.includes(botPhone) : false;
+      const botIsAdmin = this._isBotAdmin(session.sock, admins);
 
       const updateData = {
         userId,

@@ -9,6 +9,10 @@ const BROADCAST_ALLOWED = [
 
 exports.create = async (req, res) => {
   try {
+    const { content } = req.body;
+    if (content === undefined || content === null || content === "") {
+      return res.status(400).json({ error: "Le contenu de la campagne est requis" });
+    }
     const data = {};
     for (const field of BROADCAST_ALLOWED) {
       if (req.body[field] !== undefined) data[field] = req.body[field];

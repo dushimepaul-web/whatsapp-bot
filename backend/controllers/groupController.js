@@ -31,6 +31,9 @@ exports.members = async (req, res) => {
     const members = await groupManager.getGroupMembers(req.params.id, req.user._id);
     res.json({ members });
   } catch (err) {
+    if (err.message === "Groupe introuvable") {
+      return res.status(404).json({ error: err.message });
+    }
     res.status(500).json({ error: "Erreur serveur" });
   }
 };
@@ -40,6 +43,9 @@ exports.admins = async (req, res) => {
     const admins = await groupManager.getGroupAdmins(req.params.id, req.user._id);
     res.json({ admins });
   } catch (err) {
+    if (err.message === "Groupe introuvable") {
+      return res.status(404).json({ error: err.message });
+    }
     res.status(500).json({ error: "Erreur serveur" });
   }
 };
@@ -66,6 +72,9 @@ exports.refresh = async (req, res) => {
 exports.toggleVisibility = async (req, res) => {
   try {
     const { isVisible } = req.body;
+    if (typeof isVisible !== "boolean") {
+      return res.status(400).json({ error: "isVisible doit être un booléen" });
+    }
     const Group = require("../models/Group");
     const group = await Group.findOneAndUpdate(
       { groupId: req.params.id, userId: req.user._id },
@@ -82,6 +91,9 @@ exports.toggleVisibility = async (req, res) => {
 exports.toggleRestrict = async (req, res) => {
   try {
     const { isRestricted } = req.body;
+    if (typeof isRestricted !== "boolean") {
+      return res.status(400).json({ error: "isRestricted doit être un booléen" });
+    }
     const Group = require("../models/Group");
     const group = await Group.findOneAndUpdate(
       { groupId: req.params.id, userId: req.user._id },

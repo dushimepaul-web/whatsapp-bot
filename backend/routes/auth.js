@@ -1,9 +1,9 @@
 const router = require("express").Router();
 const authController = require("../controllers/authController");
 const { auth } = require("../middlewares/auth");
-const { authLimiter } = require("../middlewares/rateLimiter");
+const { authLimiter, registerLimiter } = require("../middlewares/rateLimiter");
 
-router.post("/register", authLimiter, authController.register);
+router.post("/register", registerLimiter, authController.register);
 router.post("/login", authLimiter, authController.login);
 router.post("/refresh", authLimiter, authController.refresh);
 router.post("/logout", auth, authController.logout);

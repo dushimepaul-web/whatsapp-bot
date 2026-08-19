@@ -19,7 +19,7 @@ services:
     container_name: whatsapp-backend
     restart: unless-stopped
     ports:
-      - "9013:3001"
+      - "4001:3001"
     depends_on:
       - mongodb
     environment:
@@ -41,7 +41,7 @@ services:
     container_name: whatsapp-frontend
     restart: unless-stopped
     ports:
-      - "9016:80"
+      - "3001:80"
     depends_on:
       - backend
 
