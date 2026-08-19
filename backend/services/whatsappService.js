@@ -27,7 +27,21 @@ class WhatsAppService {
     this.RECONNECT_BASE_DELAY = 3000;
     this.RECONNECT_MAX_DELAY = 30000;
     this.RECONNECT_MAX_ATTEMPTS = 15;
-    this.KEEP_ALIVE_INTERVAL = 15000;
+    this._settingsCache = new Map();
+  }
+
+  async _getSettings(userId) {
+    const now = Date.now();
+    const cached = this._settingsCache.get(userId);
+    if (cached && now - cached.ts < 10000) return cached.settings;
+    let settings;
+    try {
+      settings = await Setting.findOne({ userId });
+    } catch (e) {
+      logger.warn(`Erreur getSettings user=${userId}:`, e);
+    }
+    this._settingsCache.set(userId, { settings: settings || null, ts: now });
+    return settings || null;
   }
 
   _getSession(userId) {
@@ -45,7 +59,9 @@ class WhatsAppService {
         authDir: path.join(this.baseAuthDir, key),
         reconnectCount: 0,
         reconnectTimer: null,
-        keepAliveTimer: null,
+        syncTimer: null,
+        lastSyncAt: 0,
+        syncing: false,
       });
     }
     return this.sessions.get(key);
@@ -99,26 +115,20 @@ class WhatsAppService {
     }, delay);
   }
 
-  _startKeepAlive(session) {
-    this._stopKeepAlive(session);
-    const sock = session.sock;
-    if (!sock) return;
-    session.keepAliveTimer = setInterval(() => {
+  _scheduleGroupSync(userId) {
+    const session = this._getSession(userId);
+    if (session.syncTimer) clearTimeout(session.syncTimer);
+    session.syncTimer = setTimeout(async () => {
+      session.syncTimer = null;
+      const now = Date.now();
+      if (now - (session.lastSyncAt || 0) < 600000) return;
+      session.lastSyncAt = now;
       try {
-        const wsClient = sock.ws;
-        const raw = wsClient && (wsClient.socket || wsClient);
-        if (raw && typeof raw.ping === "function" && raw.readyState === 1) raw.ping();
+        await this.syncGroups(userId);
       } catch (e) {
-        logger.warn(`Keepalive user=${session.userId}: ${e.message || e}`);
+        logger.error(`Erreur sync planifié user=${userId}:`, e.message || e);
       }
-    }, this.KEEP_ALIVE_INTERVAL);
-  }
-
-  _stopKeepAlive(session) {
-    if (session.keepAliveTimer) {
-      clearInterval(session.keepAliveTimer);
-      session.keepAliveTimer = null;
-    }
+    }, 10000);
   }
 
   async _notifyGroupsServerStarted(sock, userId) {
@@ -244,7 +254,6 @@ class WhatsAppService {
           session.isConnecting = false;
           session.isPairing = false;
           session.reconnectCount = 0;
-          this._startKeepAlive(session);
           const phone = sock.user?.id ? sock.user.id.split("@")[0].split(":")[0] : null;
           if (session.statusCallback) session.statusCallback("connected");
 
@@ -273,7 +282,7 @@ class WhatsAppService {
             );
           }
 
-          await this.syncGroups(userId);
+          this._scheduleGroupSync(userId);
         }
 
         if (connection === "close") {
@@ -281,7 +290,6 @@ class WhatsAppService {
           session.isConnected = false;
           session.isConnecting = false;
           session.isPairing = false;
-          this._stopKeepAlive(session);
           this._clearReconnectTimer(session);
           if (session.statusCallback) session.statusCallback("disconnected");
 
@@ -335,7 +343,7 @@ class WhatsAppService {
     sock.ev.on("messages.upsert", async ({ messages, type }) => {
       try {
         if (!messages || !Array.isArray(messages)) return;
-        const settings = await Setting.findOne({ userId });
+        const settings = await this._getSettings(userId);
         for (const msg of messages) {
           if (!msg || !msg.message) continue;
           const from = msg.key.remoteJid;
@@ -363,8 +371,9 @@ class WhatsAppService {
       try {
         const { id, participants, action } = ev || {};
         if (!id || !participants) return;
+        moderation.clearCache(id, userId);
         if (action === "add") {
-          const settings = await Setting.findOne({ userId });
+          const settings = await this._getSettings(userId);
           if (settings?.welcomeMessage) {
             for (const p of participants) {
               const jid = typeof p === "string" ? p : p.jid;
@@ -383,7 +392,7 @@ class WhatsAppService {
 
     sock.ev.on("call", async (calls) => {
       if (!calls || !Array.isArray(calls)) return;
-      const settings = await Setting.findOne({ userId });
+      const settings = await this._getSettings(userId);
       if (settings?.autoRejectCalls) {
         for (const call of calls) {
           try {
@@ -402,7 +411,6 @@ class WhatsAppService {
 
   async disconnect(userId) {
     const session = this._getSession(userId);
-    this._stopKeepAlive(session);
     this._clearReconnectTimer(session);
     session.isConnecting = false;
     session.isConnected = false;
@@ -438,7 +446,8 @@ class WhatsAppService {
 
   async syncGroups(userId) {
     const session = this._getSession(userId);
-    if (!session.sock) return;
+    if (!session.sock || session.syncing) return;
+    session.syncing = true;
     try {
       const groups = await session.sock.groupFetchAllParticipating();
       const entries = Object.entries(groups);
@@ -517,6 +526,8 @@ class WhatsAppService {
       });
     } catch (err) {
       logger.error(`Erreur sync groupes user=${userId}:`, err);
+    } finally {
+      session.syncing = false;
     }
   }
 

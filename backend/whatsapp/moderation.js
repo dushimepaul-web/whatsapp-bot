@@ -34,29 +34,66 @@ const detectMessageType = (msgContent) => {
   return null;
 };
 
+const WARNING_COOLDOWN_MS = 60 * 1000;
+const POLICY_CACHE_TTL_MS = 60 * 1000;
+
 class Moderation {
+  constructor() {
+    this._warningCooldowns = new Map();
+    this._policyCache = new Map();
+  }
+
+  clearCache(groupId, userId) {
+    if (groupId) {
+      this._policyCache.delete(`${userId}:${groupId}`);
+    } else {
+      this._policyCache.clear();
+    }
+  }
+
+  _shouldWarn(groupId, participant) {
+    const key = `${groupId}:${participant}`;
+    const now = Date.now();
+    const last = this._warningCooldowns.get(key) || 0;
+    if (now - last < WARNING_COOLDOWN_MS) return false;
+    this._warningCooldowns.set(key, now);
+    if (this._warningCooldowns.size > 1000) {
+      for (const [k, t] of this._warningCooldowns) {
+        if (now - t > WARNING_COOLDOWN_MS * 10) this._warningCooldowns.delete(k);
+      }
+    }
+    return true;
+  }
+
   async handleMessage(sock, msg, from, userId) {
     const rawContent = msg.message;
     if (!rawContent) return;
 
-    const group = await Group.findOne({ groupId: from, userId }).lean();
+    const cacheKey = `${userId}:${from}`;
+    let policy = this._policyCache.get(cacheKey);
+    if (!policy || Date.now() - policy.ts >= POLICY_CACHE_TTL_MS) {
+      const [group, members] = await Promise.all([
+        Group.findOne({ groupId: from, userId }).lean(),
+        Member.find({ groupId: from, userId }).select("jid isAdmin isSuperAdmin").lean(),
+      ]);
+      const adminJids = new Set();
+      for (const m of members) {
+        if (m.isAdmin || m.isSuperAdmin) adminJids.add(m.jid.split(":")[0]);
+      }
+      policy = {
+        isRestricted: !!group?.isRestricted,
+        botIsAdmin: !!group?.botIsAdmin,
+        adminJids,
+        ts: Date.now(),
+      };
+      this._policyCache.set(cacheKey, policy);
+    }
 
-    if (!group?.isRestricted || !group.botIsAdmin) return;
+    if (!policy.isRestricted || !policy.botIsAdmin) return;
 
     const rawParticipant = msg.key.participant || msg.key.remoteJid;
     if (!rawParticipant) return;
-    const senderPhone = rawParticipant.split("@")[0].split(":")[0];
-
-    let isAdmin = false;
-    const members = await Member.find({ groupId: from, userId }).lean();
-    for (const member of members) {
-      const memberPhone = member.jid.split("@")[0].split(":")[0];
-      if (memberPhone === senderPhone && (member.isAdmin || member.isSuperAdmin)) {
-        isAdmin = true;
-        break;
-      }
-    }
-    if (isAdmin) return;
+    if (policy.adminJids.has(rawParticipant.split(":")[0])) return;
 
     const msgContent = getRealMessage(rawContent);
     if (!msgContent) return;
@@ -91,25 +128,28 @@ class Moderation {
 
     if (isDisallowed) {
       try {
-        try {
-          await sock.sendMessage(from, { delete: msg.key });
-        } catch (delErr) {
-          logger.warn(`Suppression impossible dans ${from}: ${delErr.message}. Le bot n'est peut-être pas admin.`);
+        await sock.sendMessage(from, { delete: msg.key });
+
+        const warningSent = this._shouldWarn(from, rawParticipant);
+        if (warningSent) {
+          const phoneLabel = rawParticipant.split("@")[0];
+          await sock.sendMessage(from, {
+            text: `@${phoneLabel} Désolé, ${warningText}.`,
+            mentions: [rawParticipant],
+          });
         }
 
-        const phoneLabel = rawParticipant.split("@")[0];
-        await sock.sendMessage(from, {
-          text: `@${phoneLabel} Désolé, ${warningText}.`,
-          mentions: [rawParticipant],
-        });
-
-        logger.info(`Message modéré (${reason}) de ${rawParticipant} dans ${from}`);
-        await logger.db({
-          userId,
-          type: "moderation",
-          action: "message_deleted",
-          details: { reason, from, participant: rawParticipant },
-        });
+        logger.info(
+          `Message modéré (${reason}) de ${rawParticipant} dans ${from}${warningSent ? "" : " (avertissement ignoré - cooldown)"}`
+        );
+        logger
+          .db({
+            userId,
+            type: "moderation",
+            action: "message_deleted",
+            details: { reason, from, participant: rawParticipant, warned: warningSent },
+          })
+          .catch(() => {});
       } catch (err) {
         logger.error(`Erreur modération: ${err.message || err}`);
       }
